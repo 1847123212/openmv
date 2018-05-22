@@ -10,14 +10,18 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
+#include <float.h>
 #include <math.h>
 #include <arm_math.h>
 #include <ff.h>
 #include "fb_alloc.h"
+#include "umm_malloc.h"
 #include "xalloc.h"
 #include "array.h"
 #include "fmath.h"
 #include "collections.h"
+#include "imlib_config.h"
 
 #define IM_LOG2_2(x)    (((x) &                0x2ULL) ? ( 2                        ) :             1) // NO ({ ... }) !
 #define IM_LOG2_4(x)    (((x) &                0xCULL) ? ( 2 +  IM_LOG2_2((x) >>  2)) :  IM_LOG2_2(x)) // NO ({ ... }) !
@@ -28,6 +32,8 @@
 
 #define IM_MAX(a,b)     ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a > _b ? _a : _b; })
 #define IM_MIN(a,b)     ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
+#define IM_DIV(a,b)     ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _b ? (_a / _b) : 0; })
+#define IM_MOD(a,b)     ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _b ? (_a % _b) : 0; })
 
 #define INT8_T_BITS     (sizeof(int8_t) * 8)
 #define INT8_T_MASK     (INT8_T_BITS - 1)
@@ -61,6 +67,9 @@
 #define UINT64_T_MASK   (UINT64_T_BITS - 1)
 #define UINT64_T_SHIFT  IM_LOG2(UINT64_T_MASK)
 
+#define IM_DEG2RAD(x)   (((x)*M_PI)/180)
+#define IM_RAD2DEG(x)   (((x)*180)/M_PI)
+
 /////////////////
 // Point Stuff //
 /////////////////
@@ -85,6 +94,8 @@ typedef struct line {
     int16_t x2;
     int16_t y2;
 } line_t;
+
+bool lb_clip_line(line_t *l, int x, int y, int w, int h);
 
 /////////////////////
 // Rectangle Stuff //
@@ -116,7 +127,13 @@ typedef struct color_thresholds_list_lnk_data
 }
 color_thresholds_list_lnk_data_t;
 
-#define COLOR_THRESHOLD_BINARY(pixel, threshold, invert) ((pixel) ^ (invert))
+#define COLOR_THRESHOLD_BINARY(pixel, threshold, invert) \
+({ \
+    __typeof__ (pixel) _pixel = (pixel); \
+    __typeof__ (threshold) _threshold = (threshold); \
+    __typeof__ (invert) _invert = (invert); \
+    ((_threshold->LMin <= _pixel) && (_pixel <= _threshold->LMax)) ^ _invert; \
+})
 
 #define COLOR_THRESHOLD_GRAYSCALE(pixel, threshold, invert) \
 ({ \
@@ -134,11 +151,43 @@ color_thresholds_list_lnk_data_t;
     uint8_t _l = COLOR_RGB565_TO_L(_pixel); \
     int8_t _a = COLOR_RGB565_TO_A(_pixel); \
     int8_t _b = COLOR_RGB565_TO_B(_pixel); \
-    ((_threshold->LMin <= _l) && (_l <= _threshold->LMax) && (_threshold->AMin <= _a) && (_a <= _threshold->AMax) && (_threshold->BMin <= _b) && (_b <= _threshold->BMax)) ^ _invert; \
+    ((_threshold->LMin <= _l) && (_l <= _threshold->LMax) && \
+    (_threshold->AMin <= _a) && (_a <= _threshold->AMax) && \
+    (_threshold->BMin <= _b) && (_b <= _threshold->BMax)) ^ _invert; \
+})
+
+#define COLOR_BOUND_BINARY(pixel0, pixel1, threshold) \
+({ \
+    __typeof__ (pixel0) _pixel0 = (pixel0); \
+    __typeof__ (pixel1) _pixel1 = (pixel1); \
+    __typeof__ (threshold) _threshold = (threshold); \
+    (abs(_pixel0 - _pixel1) <= _threshold); \
+})
+
+#define COLOR_BOUND_GRAYSCALE(pixel0, pixel1, threshold) \
+({ \
+    __typeof__ (pixel0) _pixel0 = (pixel0); \
+    __typeof__ (pixel1) _pixel1 = (pixel1); \
+    __typeof__ (threshold) _threshold = (threshold); \
+    (abs(_pixel0 - _pixel1) <= _threshold); \
+})
+
+#define COLOR_BOUND_RGB565(pixel0, pixel1, threshold) \
+({ \
+    __typeof__ (pixel0) _pixel0 = (pixel0); \
+    __typeof__ (pixel1) _pixel1 = (pixel1); \
+    __typeof__ (threshold) _threshold = (threshold); \
+    (abs(COLOR_RGB565_TO_R5(_pixel0) - COLOR_RGB565_TO_R5(_pixel1)) <= COLOR_RGB565_TO_R5(_threshold)) && \
+    (abs(COLOR_RGB565_TO_G6(_pixel0) - COLOR_RGB565_TO_G6(_pixel1)) <= COLOR_RGB565_TO_G6(_threshold)) && \
+    (abs(COLOR_RGB565_TO_B5(_pixel0) - COLOR_RGB565_TO_B5(_pixel1)) <= COLOR_RGB565_TO_B5(_threshold)); \
 })
 
 #define COLOR_BINARY_MIN 0
 #define COLOR_BINARY_MAX 1
+#define COLOR_GRAYSCALE_BINARY_MIN 0x00
+#define COLOR_GRAYSCALE_BINARY_MAX 0xFF
+#define COLOR_RGB565_BINARY_MIN 0x0000
+#define COLOR_RGB565_BINARY_MAX 0xFFFF
 
 #define COLOR_GRAYSCALE_MIN 0
 #define COLOR_GRAYSCALE_MAX 255
@@ -167,8 +216,8 @@ color_thresholds_list_lnk_data_t;
 #define COLOR_Y_MIN -128
 #define COLOR_Y_MAX 127
 #define COLOR_U_MIN -128
-#define COLOR_V_MAX 127
-#define COLOR_U_MIN -128
+#define COLOR_U_MAX 127
+#define COLOR_V_MIN -128
 #define COLOR_V_MAX 127
 
 extern const uint8_t rb528_table[32];
@@ -203,7 +252,7 @@ extern const uint8_t g826_table[256];
     __typeof__ (r5) _r5 = (r5); \
     __typeof__ (g6) _g6 = (g6); \
     __typeof__ (b5) _b5 = (b5); \
-    (_r5 << 3) | (_g6 >> 3) | (_g6 << 13) | (_b5 << 8); \
+    (_r5 << 3) | (_g6 >> 3) | ((_g6 & 0x7) << 13) | (_b5 << 8); \
 })
 
 #define COLOR_R8_G8_B8_TO_RGB565(r8, g8, b8) COLOR_R5_G6_B5_TO_RGB565(COLOR_R8_TO_R5(r8), COLOR_G8_TO_G6(g8), COLOR_B8_TO_B5(b8))
@@ -238,10 +287,10 @@ extern const int8_t yuv_table[196608];
     _r_lin = (_r_lin > 0.0031308f) ? ((1.055f * powf(_r_lin, 0.416666f)) - 0.055f) : (_r_lin * 12.92f); \
     _g_lin = (_g_lin > 0.0031308f) ? ((1.055f * powf(_g_lin, 0.416666f)) - 0.055f) : (_g_lin * 12.92f); \
     _b_lin = (_b_lin > 0.0031308f) ? ((1.055f * powf(_b_lin, 0.416666f)) - 0.055f) : (_b_lin * 12.92f); \
-    unsigned int _r = IM_MAX(IM_MIN(roundf(_r_lin * COLOR_R5_MAX), COLOR_R5_MAX), COLOR_R5_MIN); \
-    unsigned int _g = IM_MAX(IM_MIN(roundf(_g_lin * COLOR_G6_MAX), COLOR_G6_MAX), COLOR_G6_MIN); \
-    unsigned int _b = IM_MAX(IM_MIN(roundf(_b_lin * COLOR_B5_MAX), COLOR_B5_MAX), COLOR_B5_MIN); \
-    COLOR_R5_G6_B5_TO_RGB565(_r, _g, _b); \
+    unsigned int _rgb565_r = IM_MAX(IM_MIN(roundf(_r_lin * COLOR_R5_MAX), COLOR_R5_MAX), COLOR_R5_MIN); \
+    unsigned int _rgb565_g = IM_MAX(IM_MIN(roundf(_g_lin * COLOR_G6_MAX), COLOR_G6_MAX), COLOR_G6_MIN); \
+    unsigned int _rgb565_b = IM_MAX(IM_MIN(roundf(_b_lin * COLOR_B5_MAX), COLOR_B5_MAX), COLOR_B5_MIN); \
+    COLOR_R5_G6_B5_TO_RGB565(_rgb565_r, _rgb565_g, _rgb565_b); \
 })
 
 // https://en.wikipedia.org/wiki/YCbCr -> JPEG Conversion
@@ -257,11 +306,65 @@ extern const int8_t yuv_table[196608];
     COLOR_R8_G8_B8_TO_RGB565(_r, _g, _b); \
 })
 
+#define COLOR_BAYER_TO_RGB565(img, x, y, r, g, b)            \
+({                                                           \
+    __typeof__ (x) __x = (x);                                \
+    __typeof__ (y) __y = (y);                                \
+    if ((__y % 2) == 0) {                                    \
+        if ((__x % 2) == 0) {                                \
+            r = (IM_GET_RAW_PIXEL(img, __x-1, __y-1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y-1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x-1, __y+1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y+1)) >> 2;  \
+                                                             \
+            g = (IM_GET_RAW_PIXEL(img, __x,   __y-1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x,   __y+1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x-1, __y)    +      \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y))   >> 2;  \
+                                                             \
+            b = IM_GET_RAW_PIXEL(img,  __x, __y);            \
+        } else {                                             \
+            r = (IM_GET_RAW_PIXEL(img, __x, __y-1)  +        \
+                 IM_GET_RAW_PIXEL(img, __x, __y+1)) >> 1;    \
+                                                             \
+            b = (IM_GET_RAW_PIXEL(img, __x-1, __y)  +        \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y)) >> 1;    \
+                                                             \
+            g =  IM_GET_RAW_PIXEL(img, __x, __y);            \
+        }                                                    \
+    } else {                                                 \
+        if ((__x % 2) == 0) {                                \
+            r = (IM_GET_RAW_PIXEL(img, __x-1, __y)  +        \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y)) >> 1;    \
+                                                             \
+            g =  IM_GET_RAW_PIXEL(img, __x, __y);            \
+                                                             \
+            b = (IM_GET_RAW_PIXEL(img, __x, __y-1)  +        \
+                 IM_GET_RAW_PIXEL(img, __x, __y+1)) >> 1;    \
+        } else {                                             \
+            r = IM_GET_RAW_PIXEL(img,  __x, __y);            \
+                                                             \
+            g = (IM_GET_RAW_PIXEL(img, __x, __y-1)    +      \
+                 IM_GET_RAW_PIXEL(img, __x, __y+1)    +      \
+                 IM_GET_RAW_PIXEL(img, __x-1, __y)    +      \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y))   >> 2;  \
+                                                             \
+            b = (IM_GET_RAW_PIXEL(img, __x-1, __y-1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y-1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x-1, __y+1)  +      \
+                 IM_GET_RAW_PIXEL(img, __x+1, __y+1)) >> 2;  \
+        }                                                    \
+    }                                                        \
+    r  = IM_R825(r);                                         \
+    g  = IM_G826(g);                                         \
+    b  = IM_B825(b);                                         \
+})
+
 #define COLOR_BINARY_TO_GRAYSCALE(pixel) ((pixel) * COLOR_GRAYSCALE_MAX)
 #define COLOR_BINARY_TO_RGB565(pixel) COLOR_YUV_TO_RGB565((pixel) * 127, 0, 0)
-#define COLOR_RGB565_TO_BINARY(pixel) (COLOR_RGB565_TO_Y(pixel) == 127)
+#define COLOR_RGB565_TO_BINARY(pixel) (COLOR_RGB565_TO_Y(pixel) > (((COLOR_Y_MAX - COLOR_Y_MIN) / 2) + COLOR_Y_MIN))
 #define COLOR_RGB565_TO_GRAYSCALE(pixel) (COLOR_RGB565_TO_Y(pixel) + 128)
-#define COLOR_GRAYSCALE_TO_BINARY(pixel) ((pixel) == COLOR_GRAYSCALE_MAX)
+#define COLOR_GRAYSCALE_TO_BINARY(pixel) ((pixel) > (((COLOR_GRAYSCALE_MAX - COLOR_GRAYSCALE_MIN) / 2) + COLOR_GRAYSCALE_MIN))
 #define COLOR_GRAYSCALE_TO_RGB565(pixel) COLOR_YUV_TO_RGB565((pixel) - 128, 0, 0)
 
 /////////////////
@@ -270,10 +373,11 @@ extern const int8_t yuv_table[196608];
 
 typedef enum image_bpp
 {
-    IMAGE_BPP_BINARY, // bpp = 0
-    IMAGE_BPP_GRAYSCALE, // bpp = 1
-    IMAGE_BPP_RGB565, // bpp = 2
-    IMAGE_BPP_JPEG // bpp != 0 && bpp != 1 && bpp != 2
+    IMAGE_BPP_BINARY,       // BPP = 0
+    IMAGE_BPP_GRAYSCALE,    // BPP = 1
+    IMAGE_BPP_RGB565,       // BPP = 2
+    IMAGE_BPP_BAYER,        // BPP = 3
+    IMAGE_BPP_JPEG          // BPP > 3
 }
 image_bpp_t;
 
@@ -289,6 +393,34 @@ typedef struct image {
 
 void image_init(image_t *ptr, int w, int h, int bpp, void *data);
 void image_copy(image_t *dst, image_t *src);
+size_t image_size(image_t *ptr);
+bool image_get_mask_pixel(image_t *ptr, int x, int y);
+
+#define IMAGE_IS_MUTABLE(image) \
+({ \
+    __typeof__ (image) _image = (image); \
+    (_image->bpp == IMAGE_BPP_BINARY) || \
+    (_image->bpp == IMAGE_BPP_GRAYSCALE) || \
+    (_image->bpp == IMAGE_BPP_RGB565); \
+})
+
+#define IMAGE_IS_MUTABLE_BAYER(image) \
+({ \
+    __typeof__ (image) _image = (image); \
+    (_image->bpp == IMAGE_BPP_BINARY) || \
+    (_image->bpp == IMAGE_BPP_GRAYSCALE) || \
+    (_image->bpp == IMAGE_BPP_RGB565) || \
+    (_image->bpp == IMAGE_BPP_BAYER); \
+})
+
+#define IMAGE_BINARY_LINE_LEN(image) (((image)->w + UINT32_T_MASK) >> UINT32_T_SHIFT)
+#define IMAGE_BINARY_LINE_LEN_BYTES(image) (IMAGE_BINARY_LINE_LEN(image) * sizeof(uint32_t))
+
+#define IMAGE_GRAYSCALE_LINE_LEN(image) ((image)->w)
+#define IMAGE_GRAYSCALE_LINE_LEN_BYTES(image) (IMAGE_GRAYSCALE_LINE_LEN(image) * sizeof(uint8_t))
+
+#define IMAGE_RGB565_LINE_LEN(image) ((image)->w)
+#define IMAGE_RGB565_LINE_LEN_BYTES(image) (IMAGE_RGB565_LINE_LEN(image) * sizeof(uint16_t))
 
 #define IMAGE_GET_BINARY_PIXEL(image, x, y) \
 ({ \
@@ -350,7 +482,7 @@ void image_copy(image_t *dst, image_t *src);
     ((uint16_t *) _image->data)[(_image->w * _y) + _x]; \
 })
 
-#define IMAGE_PUT_RGB565_PIXEL(image, x, y) \
+#define IMAGE_PUT_RGB565_PIXEL(image, x, y, v) \
 ({ \
     __typeof__ (image) _image = (image); \
     __typeof__ (x) _x = (x); \
@@ -613,8 +745,8 @@ extern const uint8_t g826_table[256];
 // Image kernels
 extern const int8_t kernel_gauss_3[9];
 extern const int8_t kernel_gauss_5[25];
-extern const int8_t kernel_laplacian_3[9];
-extern const int8_t kernel_high_pass_3[9];
+extern const int kernel_laplacian_3[9];
+extern const int kernel_high_pass_3[9];
 
 #define IM_RGB5652L(p) \
     ({ __typeof__ (p) _p = (p); \
@@ -648,9 +780,9 @@ extern const int8_t kernel_high_pass_3[9];
 #define IM_B_HIST_SIZE (256)
 #define IM_B_HIST_OFFSET (512)
 
-#define IM_IS_NULL(img) \
+#define IM_IS_BINARY(img) \
     ({ __typeof__ (img) _img = (img); \
-       _img->bpp <= 0; })
+       _img->bpp == 0; })
 
 #define IM_IS_GS(img) \
     ({ __typeof__ (img) _img = (img); \
@@ -660,9 +792,17 @@ extern const int8_t kernel_high_pass_3[9];
     ({ __typeof__ (img) _img = (img); \
        _img->bpp == 2; })
 
+#define IM_IS_BAYER(img) \
+    ({ __typeof__ (img) _img = (img); \
+       _img->bpp == 3; })
+
 #define IM_IS_JPEG(img) \
     ({ __typeof__ (img) _img = (img); \
-       _img->bpp >= 3; })
+       _img->bpp >= 4; })
+
+#define IM_IS_MUTABLE(img) \
+    ({ __typeof__ (img) _img = (img); \
+       (_img->bpp == 1 || _img->bpp == 2); })
 
 #define IM_X_INSIDE(img, x) \
     ({ __typeof__ (img) _img = (img); \
@@ -684,6 +824,28 @@ extern const int8_t kernel_high_pass_3[9];
     ({ __typeof__ (img) _img = (img); \
        __typeof__ (x) _x = (x); \
        __typeof__ (y) _y = (y); \
+       ((uint8_t*)_img->pixels)[(_y*_img->w)+_x]; })
+
+#define IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x, y) \
+    ({ __typeof__ (img) _img = (img); \
+       __typeof__ (x) _x = (x); \
+       __typeof__ (y) _y = (y); \
+       _x = (_x < 0) ? 0 : (_x >= img->w) ? (img->w -1): _x; \
+       ((uint8_t*)_img->pixels)[(_y*_img->w)+_x]; })
+
+#define IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y) \
+    ({ __typeof__ (img) _img = (img); \
+       __typeof__ (x) _x = (x); \
+       __typeof__ (y) _y = (y); \
+       _y = (_y < 0) ? 0 : (_y >= img->h) ? (img->h -1): _y; \
+       ((uint8_t*)_img->pixels)[(_y*_img->w)+_x]; })
+
+#define IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x, y) \
+    ({ __typeof__ (img) _img = (img); \
+       __typeof__ (x) _x = (x); \
+       __typeof__ (y) _y = (y); \
+       _x = (_x < 0) ? 0 : (_x >= img->w) ? (img->w -1): _x; \
+       _y = (_y < 0) ? 0 : (_y >= img->h) ? (img->h -1): _y; \
        ((uint8_t*)_img->pixels)[(_y*_img->w)+_x]; })
 
 #define IM_GET_RGB565_PIXEL(img, x, y) \
@@ -816,7 +978,8 @@ typedef enum save_image_format {
     FORMAT_DONT_CARE,
     FORMAT_BMP,
     FORMAT_PNM,
-    FORMAT_JPG
+    FORMAT_JPG,
+    FORMAT_RAW,
 } save_image_format_t;
 
 typedef struct img_read_settings {
@@ -828,7 +991,8 @@ typedef struct img_read_settings {
     save_image_format_t format;
 } img_read_settings_t;
 
-typedef void (*line_op_t)(image_t*, int, uint8_t*);
+typedef void (*line_op_t)(image_t*, int, void*, void*, bool);
+typedef void (*flood_fill_call_back_t)(image_t *, int, int, int, void *);
 
 typedef enum descriptor_type {
     DESC_LBP,
@@ -871,45 +1035,63 @@ typedef struct percentile {
     int8_t BValue;
 } percentile_t;
 
+typedef struct threshold {
+    uint8_t LValue;
+    int8_t AValue;
+    int8_t BValue;
+} threshold_t;
+
 typedef struct statistics {
     uint8_t LMean, LMedian, LMode, LSTDev, LMin, LMax, LLQ, LUQ;
     int8_t AMean, AMedian, AMode, ASTDev, AMin, AMax, ALQ, AUQ;
     int8_t BMean, BMedian, BMode, BSTDev, BMin, BMax, BLQ, BUQ;
 } statistics_t;
 
-typedef struct find_blobs_list_lnk_data
-{
+typedef struct find_blobs_list_lnk_data {
     rectangle_t rect;
     uint32_t pixels;
     point_t centroid;
     float rotation;
     uint16_t code, count;
-}
-find_blobs_list_lnk_data_t;
+} find_blobs_list_lnk_data_t;
 
-typedef struct find_qrcodes_list_lnk_data
-{
+typedef struct find_lines_list_lnk_data {
+    line_t line;
+    uint32_t magnitude;
+    int16_t theta, rho;
+} find_lines_list_lnk_data_t;
+
+typedef struct find_circles_list_lnk_data {
+    point_t p;
+    uint32_t r, magnitude;
+} find_circles_list_lnk_data_t;
+
+typedef struct find_rects_list_lnk_data {
+    point_t corners[4];
+    rectangle_t rect;
+    uint32_t magnitude;
+} find_rects_list_lnk_data_t;
+
+typedef struct find_qrcodes_list_lnk_data {
+    point_t corners[4];
     rectangle_t rect;
     size_t payload_len;
     char *payload;
     uint8_t version, ecc_level, mask, data_type;
     uint32_t eci;
-}
-find_qrcodes_list_lnk_data_t;
+} find_qrcodes_list_lnk_data_t;
 
-typedef enum apriltag_families
-{
+typedef enum apriltag_families {
     TAG16H5 = 1,
     TAG25H7 = 2,
     TAG25H9 = 4,
     TAG36H10 = 8,
     TAG36H11 = 16,
     ARTOOLKIT = 32
-}
-apriltag_families_t;
+} apriltag_families_t;
 
-typedef struct find_apriltags_list_lnk_data
-{
+typedef struct find_apriltags_list_lnk_data {
+    point_t corners[4];
     rectangle_t rect;
     uint16_t id;
     uint8_t family, hamming;
@@ -917,8 +1099,45 @@ typedef struct find_apriltags_list_lnk_data
     float goodness, decision_margin;
     float x_translation, y_translation, z_translation;
     float x_rotation, y_rotation, z_rotation;
-}
-find_apriltags_list_lnk_data_t;
+} find_apriltags_list_lnk_data_t;
+
+typedef struct find_datamatrices_list_lnk_data {
+    point_t corners[4];
+    rectangle_t rect;
+    size_t payload_len;
+    char *payload;
+    uint16_t rotation;
+    uint8_t rows, columns;
+    uint16_t capacity, padding;
+} find_datamatrices_list_lnk_data_t;
+
+typedef enum barcodes {
+    BARCODE_EAN2,
+    BARCODE_EAN5,
+    BARCODE_EAN8,
+    BARCODE_UPCE,
+    BARCODE_ISBN10,
+    BARCODE_UPCA,
+    BARCODE_EAN13,
+    BARCODE_ISBN13,
+    BARCODE_I25,
+    BARCODE_DATABAR,
+    BARCODE_DATABAR_EXP,
+    BARCODE_CODABAR,
+    BARCODE_CODE39,
+    BARCODE_PDF417,
+    BARCODE_CODE93,
+    BARCODE_CODE128
+} barcodes_t;
+
+typedef struct find_barcodes_list_lnk_data {
+    point_t corners[4];
+    rectangle_t rect;
+    size_t payload_len;
+    char *payload;
+    uint16_t type, rotation;
+    int quality;
+} find_barcodes_list_lnk_data_t;
 
 /* Color space functions */
 void imlib_rgb_to_lab(simple_color_t *rgb, simple_color_t *lab);
@@ -926,6 +1145,7 @@ void imlib_lab_to_rgb(simple_color_t *lab, simple_color_t *rgb);
 void imlib_rgb_to_grayscale(simple_color_t *rgb, simple_color_t *grayscale);
 void imlib_grayscale_to_rgb(simple_color_t *grayscale, simple_color_t *rgb);
 uint16_t imlib_yuv_to_rgb(uint8_t y, int8_t u, int8_t v);
+void imlib_bayer_to_rgb565(image_t *img, int w, int h, int xoffs, int yoffs, uint16_t *rgbbuf);
 
 /* Image file functions */
 void ppm_read_geometry(FIL *fp, image_t *img, const char *path, ppm_read_settings_t *rs);
@@ -942,10 +1162,9 @@ void jpeg_read_pixels(FIL *fp, image_t *img);
 void jpeg_read(image_t *img, const char *path);
 void jpeg_write(image_t *img, const char *path, int quality);
 bool imlib_read_geometry(FIL *fp, image_t *img, const char *path, img_read_settings_t *rs);
-void imlib_image_operation(image_t *img, const char *path, image_t *other, line_op_t op);
+void imlib_image_operation(image_t *img, const char *path, image_t *other, int scalar, line_op_t op, void *data);
 void imlib_load_image(image_t *img, const char *path);
 void imlib_save_image(image_t *img, const char *path, rectangle_t *roi, int quality);
-void imlib_copy_image(image_t *dst, image_t *src, rectangle_t *roi);
 
 /* GIF functions */
 void gif_open(FIL *fp, int width, int height, bool color, bool loop);
@@ -956,10 +1175,6 @@ void gif_close(FIL *fp);
 void mjpeg_open(FIL *fp, int width, int height);
 void mjpeg_add_frame(FIL *fp, uint32_t *frames, uint32_t *bytes, image_t *img, int quality);
 void mjpeg_close(FIL *fp, uint32_t *frames, uint32_t *bytes, float fps);
-
-/* Basic image functions */
-int imlib_get_pixel(image_t *img, int x, int y);
-void imlib_set_pixel(image_t *img, int x, int y, int p);
 
 /* Point functions */
 point_t *point_alloc(int16_t x, int16_t y);
@@ -974,56 +1189,18 @@ bool rectangle_subimg(image_t *img, rectangle_t *r, rectangle_t *r_out);
 array_t *rectangle_merge(array_t *rectangles);
 void rectangle_expand(rectangle_t *r, int x, int y);
 
-/* Drawing functions */
-void imlib_draw_line(image_t *img, int x0, int y0, int x1, int y1, int c);
-void imlib_draw_rectangle(image_t *img, int rx, int ry, int rw, int rh, int c);
-void imlib_draw_circle(image_t *img, int cx, int cy, int r, int c);
-void imlib_draw_string(image_t *img, int x_off, int y_off, const char *str, int c);
-
-/* Binary functions */
-void imlib_binary(image_t *img,
-                  int num_thresholds, simple_color_t *l_thresholds, simple_color_t *h_thresholds,
-                  bool invert);
-void imlib_invert(image_t *img);
-void imlib_and(image_t *img, const char *path, image_t *other);
-void imlib_nand(image_t *img, const char *path, image_t *other);
-void imlib_or(image_t *img, const char *path, image_t *other);
-void imlib_nor(image_t *img, const char *path, image_t *other);
-void imlib_xor(image_t *img, const char *path, image_t *other);
-void imlib_xnor(image_t *img, const char *path, image_t *other);
-void imlib_erode(image_t *img, int ksize, int threshold);
-void imlib_dilate(image_t *img, int ksize, int threshold);
-
-/* Background Subtraction (Frame Differencing) functions */
-void imlib_negate(image_t *img);
-void imlib_difference(image_t *img, const char *path, image_t *other);
-void imlib_replace(image_t *img, const char *path, image_t *other);
-void imlib_blend(image_t *img, const char *path, image_t *other, int alpha);
-
-/* Image Morphing */
-void imlib_morph(image_t *img, const int ksize, const int8_t *krn, const float m, const int b);
-
 /* Separable 2D convolution */
 void imlib_sepconv3(image_t *img, const int8_t *krn, const float m, const int b);
 
 /* Image Statistics */
-int imlib_image_mean(image_t *src); // grayscale only
+int imlib_image_mean(image_t *src, int *r_mean, int *g_mean, int *b_mean);
 int imlib_image_std(image_t *src); // grayscale only
-
-/* Image Filtering */
-void imlib_midpoint_filter(image_t *img, const int ksize, const int bias);
-void imlib_mean_filter(image_t *img, const int ksize);
-void imlib_mode_filter(image_t *img, const int ksize);
-void imlib_median_filter(image_t *img, const int ksize, const int percentile);
-void imlib_histeq(image_t *img);
-void imlib_mask_ellipse(image_t *img);
 
 /* Template Matching */
 void imlib_midpoint_pool(image_t *img_i, image_t *img_o, int x_div, int y_div, const int bias);
 void imlib_mean_pool(image_t *img_i, image_t *img_o, int x_div, int y_div);
 float imlib_template_match_ds(image_t *image, image_t *template, rectangle_t *r);
 float imlib_template_match_ex(image_t *image, image_t *template, rectangle_t *roi, int step, rectangle_t *r);
-void imlib_phasecorrelate(image_t *img0, image_t *img1, float *x_offset, float *y_offset, float *response);
 
 /* Clustering functions */
 array_t *cluster_kmeans(array_t *points, int k, cluster_dist_t dist_func);
@@ -1059,7 +1236,7 @@ void agast_detect(image_t *image, array_t *keypoints, int threshold, rectangle_t
 /* ORB descriptor */
 array_t *orb_find_keypoints(image_t *image, bool normalized, int threshold,
         float scale_factor, int max_keypoints, corner_detector_t corner_detector, rectangle_t *roi);
-int orb_match_keypoints(array_t *kpts1, array_t *kpts2, int threshold, rectangle_t *r, point_t *c, int *angle);
+int orb_match_keypoints(array_t *kpts1, array_t *kpts2, int *match, int threshold, rectangle_t *r, point_t *c, int *angle);
 int orb_filter_keypoints(array_t *kpts, rectangle_t *r, point_t *c);
 int orb_save_descriptor(FIL *fp, array_t *kpts);
 int orb_load_descriptor(FIL *fp, array_t *kpts);
@@ -1078,9 +1255,6 @@ void imlib_find_iris(image_t *src, point_t *iris, rectangle_t *roi);
 void im_filter_bw(uint8_t *src, uint8_t *dst, int size, int bpp, void *args);
 void im_filter_skin(uint8_t *src, uint8_t *dst, int size, int bpp, void *args);
 
-// Lines
-array_t *imlib_find_lines(image_t *src, rectangle_t *roi, int threshold);
-
 // Edge detection
 void imlib_edge_simple(image_t *src, rectangle_t *roi, int low_thresh, int high_thresh);
 void imlib_edge_canny(image_t *src, rectangle_t *roi, int low_thresh, int high_thresh);
@@ -1088,21 +1262,157 @@ void imlib_edge_canny(image_t *src, rectangle_t *roi, int low_thresh, int high_t
 // HoG
 void imlib_find_hog(image_t *src, rectangle_t *roi, int cell_size);
 
-// Lens correction
+// Helper Functions
+void imlib_flood_fill_int(image_t *out, image_t *img, int x, int y,
+                          int seed_threshold, int floating_threshold,
+                          flood_fill_call_back_t cb, void *data);
+// Drawing Functions
+int imlib_get_pixel(image_t *img, int x, int y);
+void imlib_set_pixel(image_t *img, int x, int y, int p);
+void imlib_draw_line(image_t *img, int x0, int y0, int x1, int y1, int c, int thickness);
+void imlib_draw_rectangle(image_t *img, int rx, int ry, int rw, int rh, int c, int thickness, bool fill);
+void imlib_draw_circle(image_t *img, int cx, int cy, int r, int c, int thickness, bool fill);
+void imlib_draw_string(image_t *img, int x_off, int y_off, const char *str, int c, int scale, int x_spacing, int y_spacing, bool mono_space);
+void imlib_draw_image(image_t *img, image_t *other, int x_off, int y_off, float x_scale, float y_scale, image_t *mask);
+void imlib_flood_fill(image_t *img, int x, int y,
+                      float seed_threshold, float floating_threshold,
+                      int c, bool invert, bool clear_background, image_t *mask);
+// Binary Functions
+void imlib_binary(image_t *img, list_t *thresholds, bool invert, bool zero, image_t *mask);
+void imlib_invert(image_t *img);
+void imlib_b_and(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_b_nand(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_b_or(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_b_nor(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_b_xor(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_b_xnor(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_erode(image_t *img, int ksize, int threshold, image_t *mask);
+void imlib_dilate(image_t *img, int ksize, int threshold, image_t *mask);
+void imlib_open(image_t *img, int ksize, int threshold, image_t *mask);
+void imlib_close(image_t *img, int ksize, int threshold, image_t *mask);
+void imlib_top_hat(image_t *img, int ksize, int threshold, image_t *mask);
+void imlib_black_hat(image_t *img, int ksize, int threshold, image_t *mask);
+// Math Functions
+void imlib_negate(image_t *img);
+void imlib_replace(image_t *img, const char *path, image_t *other, int scalar, bool hmirror, bool vflip, image_t *mask);
+void imlib_add(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_sub(image_t *img, const char *path, image_t *other, int scalar, bool reverse, image_t *mask);
+void imlib_mul(image_t *img, const char *path, image_t *other, int scalar, bool invert, image_t *mask);
+void imlib_div(image_t *img, const char *path, image_t *other, int scalar, bool invert, image_t *mask);
+void imlib_min(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_max(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_difference(image_t *img, const char *path, image_t *other, int scalar, image_t *mask);
+void imlib_blend(image_t *img, const char *path, image_t *other, int scalar, float alpha, image_t *mask);
+// Filtering Functions
+void imlib_histeq(image_t *img, image_t *mask);
+void imlib_clahe_histeq(image_t *img, float clip_limit, image_t *mask);
+void imlib_mean_filter(image_t *img, const int ksize, bool threshold, int offset, bool invert, image_t *mask);
+void imlib_median_filter(image_t *img, const int ksize, float percentile, bool threshold, int offset, bool invert, image_t *mask);
+void imlib_mode_filter(image_t *img, const int ksize, bool threshold, int offset, bool invert, image_t *mask);
+void imlib_midpoint_filter(image_t *img, const int ksize, float bias, bool threshold, int offset, bool invert, image_t *mask);
+void imlib_morph(image_t *img, const int ksize, const int *krn, const float m, const int b, bool threshold, int offset, bool invert, image_t *mask);
+void imlib_bilateral_filter(image_t *img, const int ksize, float color_sigma, float space_sigma, bool threshold, int offset, bool invert, image_t *mask);
+void imlib_cartoon_filter(image_t *img, float seed_threshold, float floating_threshold, image_t *mask);
+// Image Correction
+void imlib_logpolar_int(image_t *dst, image_t *src, rectangle_t *roi, bool linear, bool reverse); // helper/internal
+void imlib_logpolar(image_t *img, bool linear, bool reverse);
+void imlib_remove_shadows(image_t *img, const char *path, image_t *other, int scalar, bool single);
+void imlib_chrominvar(image_t *img);
+void imlib_illuminvar(image_t *img);
+// Lens/Rotation Correction
 void imlib_lens_corr(image_t *img, float strength, float zoom);
+void imlib_rotation_corr(image_t *img, float x_rotation, float y_rotation,
+                         float z_rotation, float x_translation, float y_translation,
+                         float zoom);
 // Statistics
-void imlib_get_histogram(histogram_t *out, image_t *ptr, rectangle_t *roi);
+void imlib_get_similarity(image_t *img, const char *path, image_t *other, int scalar, float *avg, float *std, float *min, float *max);
+void imlib_get_histogram(histogram_t *out, image_t *ptr, rectangle_t *roi, list_t *thresholds, bool invert);
 void imlib_get_percentile(percentile_t *out, image_bpp_t bpp, histogram_t *ptr, float percentile);
+void imlib_get_threshold(threshold_t *out, image_bpp_t bpp, histogram_t *ptr);
 void imlib_get_statistics(statistics_t *out, image_bpp_t bpp, histogram_t *ptr);
+bool imlib_get_regression(find_lines_list_lnk_data_t *out, image_t *ptr, rectangle_t *roi, unsigned int x_stride, unsigned int y_stride,
+                          list_t *thresholds, bool invert, unsigned int area_threshold, unsigned int pixels_threshold, bool robust);
 // Color Tracking
 void imlib_find_blobs(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int x_stride, unsigned int y_stride,
                       list_t *thresholds, bool invert, unsigned int area_threshold, unsigned int pixels_threshold,
                       bool merge, int margin,
                       bool (*threshold_cb)(void*,find_blobs_list_lnk_data_t*), void *threshold_cb_arg,
                       bool (*merge_cb)(void*,find_blobs_list_lnk_data_t*,find_blobs_list_lnk_data_t*), void *merge_cb_arg);
+// Shape Detection
+size_t trace_line(image_t *ptr, line_t *l, int *theta_buffer, uint32_t *mag_buffer, point_t *point_buffer); // helper/internal
+void merge_alot(list_t *out, int threshold, int theta_threshold); // helper/internal
+void imlib_find_lines(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int x_stride, unsigned int y_stride,
+                      uint32_t threshold, unsigned int theta_margin, unsigned int rho_margin);
+void imlib_lsd_find_line_segments(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int merge_distance, unsigned int max_theta_diff);
+void imlib_find_line_segments(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int x_stride, unsigned int y_stride,
+                              uint32_t threshold, unsigned int theta_margin, unsigned int rho_margin,
+                              uint32_t segment_threshold);
+void imlib_find_circles(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int x_stride, unsigned int y_stride,
+                        uint32_t threshold, unsigned int x_margin, unsigned int y_margin, unsigned int r_margin,
+                        unsigned int r_min, unsigned int r_max, unsigned int r_step);
+void imlib_find_rects(list_t *out, image_t *ptr, rectangle_t *roi,
+                      uint32_t threshold);
 // 1/2D Bar Codes
 void imlib_find_qrcodes(list_t *out, image_t *ptr, rectangle_t *roi);
 void imlib_find_apriltags(list_t *out, image_t *ptr, rectangle_t *roi, apriltag_families_t families,
                           float fx, float fy, float cx, float cy);
+void imlib_find_datamatrices(list_t *out, image_t *ptr, rectangle_t *roi, int effort);
+void imlib_find_barcodes(list_t *out, image_t *ptr, rectangle_t *roi);
+// Template Matching
+void imlib_phasecorrelate(image_t *img0, image_t *img1, rectangle_t *roi0, rectangle_t *roi1, bool logpolar, bool fix_rotation_scale,
+                          float *x_translation, float *y_translation, float *rotation, float *scale, float *response);
 
+// LeNet (CNN for character recognition)
+#define LENGTH_KERNEL	5
+#define LENGTH_FEATURE0	32
+#define LENGTH_FEATURE1	(LENGTH_FEATURE0 - LENGTH_KERNEL + 1)
+#define LENGTH_FEATURE2	(LENGTH_FEATURE1 >> 1)
+#define LENGTH_FEATURE3	(LENGTH_FEATURE2 - LENGTH_KERNEL + 1)
+#define	LENGTH_FEATURE4	(LENGTH_FEATURE3 >> 1)
+#define LENGTH_FEATURE5	(LENGTH_FEATURE4 - LENGTH_KERNEL + 1)
+
+#define INPUT			1
+#define LAYER1			6
+#define LAYER2			6
+#define LAYER3			16
+#define LAYER4			16
+#define LAYER5			120
+
+#define LENET_INPUT_W       (28)
+#define LENET_INPUT_H       (28)
+#define LENET_OUTPUT_SIZE   (10)
+#define LENET_PADDING_SIZE  (2)
+#define LENET_MODEL_SIZE    (51902)
+
+typedef struct lenet5 {
+    float weight0_1[INPUT][LAYER1][LENGTH_KERNEL][LENGTH_KERNEL];
+    float weight2_3[LAYER2][LAYER3][LENGTH_KERNEL][LENGTH_KERNEL];
+    float weight4_5[LAYER4][LAYER5][LENGTH_KERNEL][LENGTH_KERNEL];
+    float weight5_6[LAYER5 * LENGTH_FEATURE5 * LENGTH_FEATURE5][LENET_OUTPUT_SIZE];
+
+    float bias0_1[LAYER1];
+    float bias2_3[LAYER3];
+    float bias4_5[LAYER5];
+    float bias5_6[LENET_OUTPUT_SIZE];
+
+} lenet5_t;
+
+typedef struct lenet5_feature {
+    float input[INPUT][LENGTH_FEATURE0][LENGTH_FEATURE0];
+    float layer1[LAYER1][LENGTH_FEATURE1][LENGTH_FEATURE1];
+    float layer2[LAYER2][LENGTH_FEATURE2][LENGTH_FEATURE2];
+    float layer3[LAYER3][LENGTH_FEATURE3][LENGTH_FEATURE3];
+    float layer4[LAYER4][LENGTH_FEATURE4][LENGTH_FEATURE4];
+    float layer5[LAYER5][LENGTH_FEATURE5][LENGTH_FEATURE5];
+    float output[LENET_OUTPUT_SIZE];
+} lenet5_feature_t;
+
+
+// LeNet pretrained models.
+extern const float lenet_model_num[LENET_MODEL_SIZE];
+
+uint8_t lenet_predict(lenet5_t *lenet, image_t *src, rectangle_t *roi, float *conf);
+
+// CMSIS CNN
+int imlib_classify_object(image_t *img, int8_t *output_data);
 #endif //__IMLIB_H__

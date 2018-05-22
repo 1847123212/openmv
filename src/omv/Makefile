@@ -3,31 +3,44 @@ SRCS += $(addprefix ,   \
 	main.c              \
 	xalloc.c            \
 	fb_alloc.c          \
+	umm_malloc.c        \
 	ff_wrapper.c        \
+	ini.c               \
+	framebuffer.c       \
 	array.c             \
 	usbdbg.c            \
-	sccb.c              \
+	wifi_dbg.c          \
+	cambus.c            \
 	ov9650.c            \
 	ov2640.c            \
 	ov7725.c            \
+	mt9v034.c           \
+	lepton.c            \
 	sensor.c            \
 	stm32fxxx_hal_msp.c \
 	soft_i2c.c          \
 	mutex.c             \
+	trace.c             \
    )
 
 SRCS += $(addprefix img/,   \
+	binary.c                \
 	blob.c                  \
+	clahe.c                 \
+	draw.c                  \
 	qrcode.c                \
 	apriltag.c              \
+	dmtx.c                  \
+	zbar.c                  \
 	fmath.c                 \
 	fsort.c                 \
+	qsort.c                 \
 	fft.c                   \
+	filter.c                \
 	haar.c                  \
 	imlib.c                 \
 	collections.c           \
 	stats.c                 \
-	morph.c                 \
 	integral.c              \
 	integral_mw.c           \
 	kmeans.c                \
@@ -36,10 +49,8 @@ SRCS += $(addprefix img/,   \
 	yuv_tab.c               \
 	rainbow_tab.c           \
 	rgb2rgb_tab.c           \
-	midpoint.c              \
-	mean.c                  \
-	mode.c                  \
-	median.c                \
+	invariant_tab.c         \
+	mathop.c                \
 	pool.c                  \
 	point.c                 \
 	rectangle.c             \
@@ -52,18 +63,31 @@ SRCS += $(addprefix img/,   \
 	orb.c                   \
 	template.c              \
 	phasecorrelation.c      \
+	shadow_removal.c        \
 	font.c                  \
 	jpeg.c                  \
 	lbp.c                   \
 	eye.c                   \
 	hough.c                 \
+	line.c                  \
+	lsd.c                   \
 	sincos_tab.c            \
 	edge.c                  \
 	hog.c                   \
+	lenet.c                 \
+	lenet_model_num.c       \
+	cifar10.c               \
+	cifar10_model.c         \
    )
+
+SRCS += $(addprefix nn/,    \
+	nn.c                    \
+   )
+
 
 SRCS += $(addprefix py/, \
 	py_helper.c             \
+	py_omv.c                \
 	py_sensor.c             \
 	py_image.c              \
 	py_time.c               \
@@ -73,6 +97,7 @@ SRCS += $(addprefix py/, \
 	py_mjpeg.c              \
 	py_winc.c               \
 	py_cpufreq.c            \
+	py_nn.c                 \
    )
 
 OBJS = $(addprefix $(BUILD)/, $(SRCS:.c=.o))
@@ -89,3 +114,5 @@ $(BUILD)/%.o : %.c
 $(BUILD)/%.o : %.s
 	$(ECHO) "AS $<"
 	$(AS) $(AFLAGS) $< -o $@
+
+-include $(OBJS:%.o=%.d)

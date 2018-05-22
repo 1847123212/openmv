@@ -11,6 +11,7 @@
 #include "sensor.h"
 #include "framebuffer.h"
 #include "ff.h"
+#include "usb.h"
 #include "usbdbg.h"
 #include "nlr.h"
 #include "lexer.h"
@@ -27,10 +28,6 @@ static volatile bool script_ready;
 static volatile bool script_running;
 static vstr_t script_buf;
 static mp_obj_t mp_const_ide_interrupt = MP_OBJ_NULL;
-
-extern void usbd_cdc_tx_buf_flush();
-extern uint32_t usbd_cdc_tx_buf_len();
-extern uint8_t *usbd_cdc_tx_buf(uint32_t bytes);
 extern const char *ffs_strerror(FRESULT res);
 
 void usbdbg_init()
@@ -79,14 +76,14 @@ void usbdbg_data_in(void *buffer, int length)
         }
 
         case USBDBG_TX_BUF_LEN: {
-            uint32_t tx_buf_len = usbd_cdc_tx_buf_len();
+            uint32_t tx_buf_len = usb_cdc_tx_buf_len();
             memcpy(buffer, &tx_buf_len, sizeof(tx_buf_len));
             cmd = USBDBG_NONE;
             break;
         }
 
         case USBDBG_TX_BUF: {
-            uint8_t *tx_buf = usbd_cdc_tx_buf(length);
+            uint8_t *tx_buf = usb_cdc_tx_buf(length);
             memcpy(buffer, tx_buf, length);
             if (xfer_bytes == xfer_length) {
                 cmd = USBDBG_NONE;
@@ -126,9 +123,11 @@ void usbdbg_data_in(void *buffer, int length)
             break;
 
         case USBDBG_ARCH_STR: {
-            int len = IM_MIN(64, (strlen(OMV_ARCH_STR)+1));
-            ((char *)buffer)[len-1] = 0;
-            memcpy(buffer, OMV_ARCH_STR, len);
+            snprintf((char *) buffer, 64, "%s [%s:%08X%08X%08X]",
+                    OMV_ARCH_STR, OMV_BOARD_TYPE,
+                    *((unsigned int *) (OMV_UNIQUE_ID_ADDR + 8)),
+                    *((unsigned int *) (OMV_UNIQUE_ID_ADDR + 4)),
+                    *((unsigned int *) (OMV_UNIQUE_ID_ADDR + 0)));
             cmd = USBDBG_NONE;
             break;
         }
@@ -178,10 +177,10 @@ void usbdbg_data_out(void *buffer, int length)
 
         case USBDBG_TEMPLATE_SAVE: {
             image_t image ={
-                .w = fb->w,
-                .h = fb->h,
-                .bpp = fb->bpp,
-                .pixels = fb->pixels
+                .w = MAIN_FB()->w,
+                .h = MAIN_FB()->h,
+                .bpp = MAIN_FB()->bpp,
+                .pixels = MAIN_FB()->pixels
             };
 
             // null terminate the path
@@ -199,10 +198,10 @@ void usbdbg_data_out(void *buffer, int length)
 
         case USBDBG_DESCRIPTOR_SAVE: {
             image_t image ={
-                .w = fb->w,
-                .h = fb->h,
-                .bpp = fb->bpp,
-                .pixels = fb->pixels
+                .w = MAIN_FB()->w,
+                .h = MAIN_FB()->h,
+                .bpp = MAIN_FB()->bpp,
+                .pixels = MAIN_FB()->pixels
             };
 
             // null terminate the path
@@ -260,7 +259,7 @@ void usbdbg_control(void *buffer, uint8_t request, uint32_t length)
 
                 // interrupt running code by raising an exception
                 mp_obj_exception_clear_traceback(mp_const_ide_interrupt);
-                pendsv_nlr_jump(mp_const_ide_interrupt);
+                pendsv_nlr_jump_hard(mp_const_ide_interrupt);
             }
             cmd = USBDBG_NONE;
             break;

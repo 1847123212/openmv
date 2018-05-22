@@ -34,9 +34,9 @@ TOP_DIR=$(shell pwd)
 BUILD=$(TOP_DIR)/build
 CMSIS_DIR=cmsis
 STUSB_DIR=stusb
-FATFS_DIR=fatfs
 MICROPY_DIR=micropython
 OMV_DIR=omv
+LEPTON_DIR=lepton
 WINC1500_DIR=winc1500
 BOOT_DIR=bootloader
 
@@ -44,14 +44,22 @@ BOOT_DIR=bootloader
 OMV_QSTR_DEFS = $(TOP_DIR)/$(OMV_DIR)/py/qstrdefsomv.h
 
 # Target
-TARGET ?= OPENMV2
+TARGET ?= OPENMV3
 FW_DIR=$(TOP_DIR)/../firmware/$(TARGET)
+OMV_BOARD_CONFIG_DIR=$(TOP_DIR)/$(OMV_DIR)/boards/$(TARGET)/
+MP_BOARD_CONFIG_DIR=$(TOP_DIR)/$(MICROPY_DIR)/ports/stm32/boards/$(TARGET)/
 
 # Debugging/Optimization
 ifeq ($(DEBUG), 1)
-CFLAGS += -O0 -ggdb3
+CFLAGS += -O0 -ggdb3 -DPENDSV_DEBUG
 else
 CFLAGS += -O2 -ggdb3 -DNDEBUG
+endif
+
+# OpenMV1 is No longer supported
+ifeq ($(TARGET), $(filter $(TARGET),OPENMV1 OPENMV2))
+BRACKET = :)
+$(error "This camera is no longer supported :O Have fun hacking the code $(BRACKET)")
 endif
 
 # Enable debug printf
@@ -65,32 +73,34 @@ CFLAGS += -fstack-protector-all -DSTACK_PROTECTOR
 endif
 
 # Compiler Flags
-include $(TOP_DIR)/$(OMV_DIR)/boards/$(TARGET)/omv_boardconfig.mk
+include $(OMV_BOARD_CONFIG_DIR)/omv_boardconfig.mk
 CFLAGS += -std=gnu99 -Wall -Werror -Warray-bounds -mthumb -nostartfiles -mabi=aapcs-linux -fdata-sections -ffunction-sections
 CFLAGS += -D$(MCU) -D$(CFLAGS_MCU) -D$(ARM_MATH) -fsingle-precision-constant -Wdouble-promotion -mcpu=$(CPU) -mtune=$(CPU) -mfpu=$(FPU) -mfloat-abi=hard
-CFLAGS += -D__FPU_PRESENT=1 -D__VFP_FP__ -DUSE_USB_FS -DUSE_DEVICE_MODE -DUSE_USB_OTG_ID=0 -DHSE_VALUE=12000000 -D$(TARGET) -DSTM32_HAL_H=$(HAL_INC) \
-          -DVECT_TAB_OFFSET=$(VECT_TAB_OFFSET) -DMAIN_APP_ADDR=$(MAIN_APP_ADDR)
+CFLAGS += -D__FPU_PRESENT=1 -D__VFP_FP__ -DUSE_USB_FS -DUSE_DEVICE_MODE -DUSE_USB_OTG_ID=0 -DHSE_VALUE=12000000 -D$(TARGET) -DSTM32_HAL_H=$(HAL_INC) -DVECT_TAB_OFFSET=$(VECT_TAB_OFFSET) -DMAIN_APP_ADDR=$(MAIN_APP_ADDR)
 
 CFLAGS += -I. -Iinclude
 CFLAGS += -I$(TOP_DIR)/$(BOOT_DIR)/include/
 CFLAGS += -I$(TOP_DIR)/$(CMSIS_DIR)/include/
 CFLAGS += -I$(TOP_DIR)/$(CMSIS_DIR)/include/st
 CFLAGS += -I$(TOP_DIR)/$(STHAL_DIR)/include/
-CFLAGS += -I$(TOP_DIR)/$(FATFS_DIR)/include/
+CFLAGS += -I$(TOP_DIR)/$(STHAL_DIR)/include/Legacy/
 
 CFLAGS += -I$(BUILD)/$(MICROPY_DIR)/
 CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/
 CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/py/
 CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/lib/mp-readline
-CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/stmhal/
-CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/stmhal/usbdev/core/inc/
-CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/stmhal/usbdev/class/inc/
-CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/stmhal/boards/$(TARGET)/
+CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/lib/oofatfs
+CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/ports/stm32/
+CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/ports/stm32/usbdev/core/inc/
+CFLAGS += -I$(TOP_DIR)/$(MICROPY_DIR)/ports/stm32/usbdev/class/inc/
+CFLAGS += -I$(MP_BOARD_CONFIG_DIR)
 
 CFLAGS += -I$(TOP_DIR)/$(OMV_DIR)/
 CFLAGS += -I$(TOP_DIR)/$(OMV_DIR)/py/
+CFLAGS += -I$(TOP_DIR)/$(OMV_DIR)/nn/
 CFLAGS += -I$(TOP_DIR)/$(OMV_DIR)/img/
-CFLAGS += -I$(TOP_DIR)/$(OMV_DIR)/boards/$(TARGET)/
+CFLAGS += -I$(OMV_BOARD_CONFIG_DIR)
+CFLAGS += -I$(TOP_DIR)/$(LEPTON_DIR)/include/
 CFLAGS += -I$(TOP_DIR)/$(WINC1500_DIR)/include/
 
 # Linker Flags
@@ -105,6 +115,13 @@ BOOT_LDFLAGS = -mcpu=$(CPU) -mabi=aapcs-linux -mthumb -mfpu=$(FPU) -mfloat-abi=h
 FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/CommonTables/*.o)
 FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/FastMathFunctions/*.o)
 FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/MatrixFunctions/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/nn/ActivationFunctions/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/nn/ConvolutionFunctions/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/nn/FullyConnectedFunctions/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/nn/NNSupportFunctions/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/nn/PoolingFunctions/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/nn/SoftmaxFunctions/*.o)
+
 #FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/ComplexMathFunctions/*.o)
 #FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/ControllerFunctions/*.o)
 #FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/FilteringFunctions/*.o)
@@ -112,8 +129,7 @@ FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/MatrixFunctions/*.o)
 #FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/SupportFunctions/*.o)
 #FIRM_OBJ += $(wildcard $(BUILD)/$(CMSIS_DIR)/src/dsp/TransformFunctions/*.o)
 FIRM_OBJ += $(wildcard $(BUILD)/$(STHAL_DIR)/src/*.o)
-FIRM_OBJ += $(wildcard $(BUILD)/$(FATFS_DIR)/src/*.o)
-FIRM_OBJ += $(wildcard $(BUILD)/$(FATFS_DIR)/src/option/*.o)
+FIRM_OBJ += $(wildcard $(BUILD)/$(LEPTON_DIR)/src/*.o)
 FIRM_OBJ += $(wildcard $(BUILD)/$(WINC1500_DIR)/src/*.o)
 
 #------------- OpenMV Objects ----------------#
@@ -121,31 +137,44 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/, \
 	main.o                                  \
 	xalloc.o                                \
 	fb_alloc.o                              \
+	umm_malloc.o                            \
 	ff_wrapper.o                            \
+	ini.o                                   \
+	framebuffer.o                           \
 	array.o                                 \
 	usbdbg.o                                \
-	sccb.o                                  \
+	wifi_dbg.o                              \
+	cambus.o                                \
 	ov9650.o                                \
 	ov2640.o                                \
 	ov7725.o                                \
+	mt9v034.o                               \
+	lepton.o                                \
 	sensor.o                                \
 	stm32fxxx_hal_msp.o                     \
 	soft_i2c.o                              \
 	mutex.o                                 \
+	trace.o                                 \
 	)
 
 FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/img/,\
+	binary.o                                \
 	blob.o                                  \
+	clahe.o                                 \
+	draw.o                                  \
 	qrcode.o                                \
 	apriltag.o                              \
+	dmtx.o                                  \
+	zbar.o                                  \
 	fmath.o                                 \
 	fsort.o                                 \
+	qsort.o                                 \
 	fft.o                                   \
+	filter.o                                \
 	haar.o                                  \
 	imlib.o                                 \
 	collections.o                           \
 	stats.o                                 \
-	morph.o                                 \
 	integral.o                              \
 	integral_mw.o                           \
 	kmeans.o                                \
@@ -154,10 +183,8 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/img/,\
 	yuv_tab.o                               \
 	rainbow_tab.o                           \
 	rgb2rgb_tab.o                           \
-	midpoint.o                              \
-	mean.o                                  \
-	mode.o                                  \
-	median.o                                \
+	invariant_tab.o                         \
+	mathop.o                                \
 	pool.o                                  \
 	point.o                                 \
 	rectangle.o                             \
@@ -170,18 +197,30 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/img/,\
 	orb.o                                   \
 	template.o                              \
 	phasecorrelation.o                      \
+	shadow_removal.o                        \
 	font.o                                  \
 	jpeg.o                                  \
 	lbp.o                                   \
 	eye.o                                   \
 	hough.o                                 \
+	line.o                                  \
+	lsd.o                                   \
 	sincos_tab.o                            \
 	edge.o                                  \
 	hog.o                                   \
-   )
+	lenet.o                                 \
+	lenet_model_num.o                       \
+	cifar10.o                               \
+	cifar10_model.o                         \
+	)
+
+FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/nn/,\
+	nn.o                                    \
+	)
 
 FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/py/, \
 	py_helper.o                             \
+	py_omv.o                                \
 	py_sensor.o                             \
 	py_image.o                              \
 	py_time.o                               \
@@ -191,6 +230,7 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(OMV_DIR)/py/, \
 	py_mjpeg.o                              \
 	py_winc.o                               \
 	py_cpufreq.o                            \
+	py_nn.o                                 \
 	)
 
 
@@ -208,18 +248,16 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/,\
 	usbd_conf.o             \
 	usbd_desc.o             \
 	usbd_cdc_interface.o    \
+	usbd_hid_interface.o    \
 	usbd_msc_storage.o      \
 	pendsv.o                \
 	bufhelper.o             \
 	usb.o                   \
 	gchelper.o              \
 	gccollect.o             \
-	pybstdio.o              \
 	help.o                  \
-	input.o                 \
-	import.o                \
-	lexerfatfs.o            \
 	flash.o                 \
+	flashbdev.o             \
 	storage.o               \
 	rtc.o                   \
 	irq.o                   \
@@ -232,45 +270,48 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/,\
 	spi.o                   \
 	can.o                   \
 	pin.o                   \
-	pin_defs_stmhal.o       \
+	pin_defs_stm32.o        \
 	pin_named_pins.o        \
 	pins_$(TARGET).o        \
 	timer.o                 \
 	servo.o                 \
 	rng.o                   \
 	led.o                   \
+	wdt.o                   \
 	mphalport.o             \
 	sdcard.o                \
 	fatfs_port.o            \
-	builtin_open.o          \
 	extint.o                \
 	modpyb.o                \
 	modstm.o                \
 	moduos.o                \
 	modutime.o              \
-	moduselect.o            \
 	modusocket.o            \
 	modnetwork.o            \
 	modmachine.o            \
-    )
+	machine_i2c.o           \
+	pybthread.o             \
+	mpthreadport.o          \
+	)
 
 #------------- MicroPy Objects ----------------#
 FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/lib/,\
 	utils/pyexec.o          \
-	utils/pyhelp.o          \
 	utils/printf.o          \
+	utils/interrupt_char.o  \
+	utils/sys_stdio_mphal.o \
 	libc/string0.o          \
 	netutils/netutils.o     \
 	timeutils/timeutils.o   \
-    )
+	)
 
 FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/lib/libm/,\
 	math.o          \
+	roundf.o        \
 	asinfacosf.o    \
 	atanf.o         \
 	atan2f.o        \
 	fmodf.o         \
-	roundf.o        \
 	log1pf.o        \
 	acoshf.o        \
 	asinhf.o        \
@@ -290,17 +331,18 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/lib/libm/,\
 	sf_erf.o        \
 	wf_lgamma.o     \
 	wf_tgamma.o     \
-    )
+	nearbyintf.o    \
+	)
 
 FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/lib/mp-readline/,\
 	readline.o               \
-    )
+	)
 
 
 FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/usbdev/, \
-	core/src/usbd_core.o                            \
-	core/src/usbd_ctlreq.o                          \
-	core/src/usbd_ioreq.o                           \
+	core/src/usbd_core.o                \
+	core/src/usbd_ctlreq.o              \
+	core/src/usbd_ioreq.o               \
 	class/src/usbd_cdc_msc_hid.o        \
 	class/src/usbd_msc_bot.o            \
 	class/src/usbd_msc_scsi.o           \
@@ -314,17 +356,36 @@ FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/extmod/,\
 	moduhashlib.o       \
 	modubinascii.o      \
 	modurandom.o        \
-	fsusermount.o       \
+	moduselect.o        \
+	modutimeq.o         \
+	moduheapq.o         \
+	vfs.o               \
 	vfs_fat.o           \
-	vfs_fat_ffconf.o    \
-	vfs_fat_diskio.o    \
 	vfs_fat_file.o      \
-	vfs_fat_lexer.o     \
-	vfs_fat_misc.o      \
+	vfs_reader.o        \
+	vfs_fat_diskio.o    \
+	virtpin.o           \
 	machine_mem.o       \
 	machine_i2c.o       \
-    )
+	machine_spi.o       \
+	machine_pulse.o     \
+	machine_signal.o    \
+	machine_pinbase.o   \
+	utime_mphal.o       \
+	modonewire.o        \
+	uos_dupterm.o       \
+	)
 
+FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/lib/oofatfs/,\
+	ff.o                \
+	option/unicode.o    \
+	)
+
+FIRM_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/drivers/,\
+	bus/softspi.o       \
+	dht/dht.o           \
+	memory/spiflash.o   \
+	)
 
 # Bootloader object files
 BOOT_OBJ += $(wildcard $(BUILD)/$(BOOT_DIR)/src/*.o)
@@ -333,12 +394,6 @@ BOOT_OBJ += $(wildcard $(BUILD)/$(STHAL_DIR)/src/*.o)
 BOOT_OBJ += $(addprefix $(BUILD)/$(CMSIS_DIR)/src/st/,\
 	$(STARTUP).o                                \
 	system_stm32fxxx.o                          \
-	)
-
-BOOT_OBJ += $(addprefix $(BUILD)/$(MICROPY_DIR)/usbdev/, \
-	core/src/usbd_core.o                            \
-	core/src/usbd_ctlreq.o                          \
-	core/src/usbd_ioreq.o                           \
 	)
 
 ###################################################
@@ -369,16 +424,16 @@ BOOTLOADER_OBJS: FIRMWARE_OBJS
 	$(MAKE)  -C $(BOOT_DIR)           BUILD=$(BUILD)/$(BOOT_DIR)
 
 FIRMWARE_OBJS:
-	$(MAKE)  -C $(CMSIS_DIR)          BUILD=$(BUILD)/$(CMSIS_DIR)
-	$(MAKE)  -C $(STHAL_DIR)          BUILD=$(BUILD)/$(STHAL_DIR)
-	$(MAKE)  -C $(FATFS_DIR)          BUILD=$(BUILD)/$(FATFS_DIR)
-	$(MAKE)  -C $(MICROPY_DIR)/stmhal BUILD=$(BUILD)/$(MICROPY_DIR) BOARD=$(TARGET) QSTR_DEFS=$(OMV_QSTR_DEFS)
-	$(MAKE)  -C $(WINC1500_DIR)       BUILD=$(BUILD)/$(WINC1500_DIR)
-	$(MAKE)  -C $(OMV_DIR)            BUILD=$(BUILD)/$(OMV_DIR)
+	$(MAKE)  -C $(CMSIS_DIR)                BUILD=$(BUILD)/$(CMSIS_DIR)    CFLAGS="$(CFLAGS) -fno-strict-aliasing -MMD"
+	$(MAKE)  -C $(STHAL_DIR)                BUILD=$(BUILD)/$(STHAL_DIR)    CFLAGS="$(CFLAGS) -MMD"
+	$(MAKE)  -C $(MICROPY_DIR)/ports/stm32  BUILD=$(BUILD)/$(MICROPY_DIR)  BOARD=$(TARGET) QSTR_DEFS=$(OMV_QSTR_DEFS)
+	$(MAKE)  -C $(LEPTON_DIR)               BUILD=$(BUILD)/$(LEPTON_DIR)   CFLAGS="$(CFLAGS) -MMD"
+	$(MAKE)  -C $(WINC1500_DIR)             BUILD=$(BUILD)/$(WINC1500_DIR) CFLAGS="$(CFLAGS) -MMD"
+	$(MAKE)  -C $(OMV_DIR)                  BUILD=$(BUILD)/$(OMV_DIR)      CFLAGS="$(CFLAGS) -MMD"
 
 # This target generates the main/app firmware image located at 0x08010000
 $(FIRMWARE): FIRMWARE_OBJS
-	$(CPP) -P -E -D$(TARGET) $(OMV_DIR)/stm32fxxx.ld.S > $(BUILD)/stm32fxxx.lds
+	$(CPP) -P -E -I$(OMV_BOARD_CONFIG_DIR) $(OMV_DIR)/stm32fxxx.ld.S > $(BUILD)/stm32fxxx.lds
 	$(CC) $(LDFLAGS) $(FIRM_OBJ) -o $(FW_DIR)/$(FIRMWARE).elf
 	$(OBJCOPY) -Obinary $(FW_DIR)/$(FIRMWARE).elf $(FW_DIR)/$(FIRMWARE).bin
 	$(PYTHON) $(MKDFU) -b $(MAIN_APP_ADDR):$(FW_DIR)/$(FIRMWARE).bin $(FW_DIR)/$(FIRMWARE).dfu
@@ -387,11 +442,11 @@ $(FIRMWARE): FIRMWARE_OBJS
 # once without padding, to generate the bootloader.dfu file, and once with padding
 # up to the main fw image (MAIN_APP_ADDR), to generate a contiguous firmware.bin image.
 $(BOOTLOADER): FIRMWARE_OBJS BOOTLOADER_OBJS
-	$(CPP) -P -E -D$(TARGET) $(BOOT_DIR)/stm32fxxx.ld.S > $(BUILD)/$(BOOT_DIR)/stm32fxxx.lds
+	$(CPP) -P -E -I$(OMV_BOARD_CONFIG_DIR) $(BOOT_DIR)/stm32fxxx.ld.S > $(BUILD)/$(BOOT_DIR)/stm32fxxx.lds
 	$(CC) $(BOOT_LDFLAGS) $(BOOT_OBJ) -o $(FW_DIR)/$(BOOTLOADER).elf
 	$(OBJCOPY) -Obinary $(FW_DIR)/$(BOOTLOADER).elf $(FW_DIR)/$(BOOTLOADER).bin
 	$(PYTHON) $(MKDFU) -b 0x08000000:$(FW_DIR)/$(BOOTLOADER).bin $(FW_DIR)/$(BOOTLOADER).dfu
-	$(OBJCOPY) -Obinary --pad-to=$(MAIN_APP_ADDR) $(FW_DIR)/$(BOOTLOADER).elf $(FW_DIR)/$(BOOTLOADER).bin
+	$(OBJCOPY) -Obinary --pad-to=$(MAIN_APP_ADDR) --gap-fill=0xFF $(FW_DIR)/$(BOOTLOADER).elf $(FW_DIR)/$(BOOTLOADER).bin
 
 # This target generates a combined bootloader+main firmware image.
 $(OPENMV): $(BOOTLOADER) $(FIRMWARE) | $(BUILD)
@@ -422,3 +477,15 @@ flash_dfu::
 # Flash the bootloader + main firmware image (binary)
 flash_bin::
 	$(PYDFU) -m -u $(FW_DIR)/$(OPENMV).bin
+
+# Flash the bootloader using dfu_util
+flash_boot_dfu_util::
+	dfu-util -a 0 -d 0483:df11 -D $(FW_DIR)/$(BOOTLOADER).dfu
+
+# Flash the main firmware image using dfu_util
+flash_image_dfu_util::
+	dfu-util -a 0 -d 0483:df11 -D $(FW_DIR)/$(FIRMWARE).dfu
+
+# Flash the bootloader + main firmware image (DFU) using dfu_util
+flash_dfu_util::
+	dfu-util -a 0 -d 0483:df11 -D $(FW_DIR)/$(OPENMV).dfu

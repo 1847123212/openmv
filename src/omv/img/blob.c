@@ -582,7 +582,9 @@ void imlib_find_blobs(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int 
                         rectangle_united(&(lnk_blob.rect), &(tmp_blob.rect));
                         lnk_blob.centroid.x = ((lnk_blob.centroid.x * lnk_blob.pixels) + (tmp_blob.centroid.x * tmp_blob.pixels)) / (lnk_blob.pixels + tmp_blob.pixels);
                         lnk_blob.centroid.y = ((lnk_blob.centroid.y * lnk_blob.pixels) + (tmp_blob.centroid.y * tmp_blob.pixels)) / (lnk_blob.pixels + tmp_blob.pixels);
-                        lnk_blob.rotation = ((lnk_blob.rotation * lnk_blob.pixels) + (tmp_blob.rotation * tmp_blob.pixels)) / (lnk_blob.pixels + tmp_blob.pixels);
+                        float sin_mean = ((sinf(lnk_blob.rotation) * lnk_blob.pixels) + (sinf(tmp_blob.rotation) * tmp_blob.pixels)) / (lnk_blob.pixels + tmp_blob.pixels);
+                        float cos_mean = ((cosf(lnk_blob.rotation) * lnk_blob.pixels) + (cosf(tmp_blob.rotation) * tmp_blob.pixels)) / (lnk_blob.pixels + tmp_blob.pixels);
+                        lnk_blob.rotation = fast_atan2f(sin_mean, cos_mean);
                         lnk_blob.pixels += tmp_blob.pixels; // won't overflow
                         lnk_blob.code |= tmp_blob.code;
                         lnk_blob.count = IM_MAX(IM_MIN(lnk_blob.count + tmp_blob.count, UINT16_MAX), 0);
@@ -602,4 +604,342 @@ void imlib_find_blobs(list_t *out, image_t *ptr, rectangle_t *roi, unsigned int 
             }
         }
     }
+}
+
+void imlib_flood_fill_int(image_t *out, image_t *img, int x, int y,
+                          int seed_threshold, int floating_threshold,
+                          flood_fill_call_back_t cb, void *data)
+{
+    lifo_t lifo;
+    size_t lifo_len;
+    lifo_alloc_all(&lifo, &lifo_len, sizeof(xylf_t));
+
+    switch(img->bpp) {
+        case IMAGE_BPP_BINARY: {
+            for(int seed_pixel = IMAGE_GET_BINARY_PIXEL(img, x, y);;) {
+                int left = x, right = x;
+                uint32_t *row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(img, y);
+                uint32_t *out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y);
+
+                while ((left > 0)
+                && (!IMAGE_GET_BINARY_PIXEL_FAST(out_row, left - 1))
+                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, left - 1), seed_pixel, seed_threshold)
+                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, left - 1),
+                                      IMAGE_GET_BINARY_PIXEL_FAST(row, left), floating_threshold)) {
+                    left--;
+                }
+
+                while ((right < (img->w - 1))
+                && (!IMAGE_GET_BINARY_PIXEL_FAST(out_row, right + 1))
+                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, right + 1), seed_pixel, seed_threshold)
+                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, right + 1),
+                                      IMAGE_GET_BINARY_PIXEL_FAST(row, right), floating_threshold)) {
+                    right++;
+                }
+
+                for (int i = left; i <= right; i++) {
+                    IMAGE_SET_BINARY_PIXEL_FAST(out_row, i);
+                }
+
+                bool break_out = false;
+                for(;;) {
+                    if (lifo_size(&lifo) < lifo_len) {
+                        uint32_t *old_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(img, y);
+
+                        if (y > 0) {
+                            row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(img, y - 1);
+                            out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y - 1);
+
+                            bool recurse = false;
+                            for (int i = left; i <= right; i++) {
+                                if ((!IMAGE_GET_BINARY_PIXEL_FAST(out_row, i))
+                                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, i), seed_pixel, seed_threshold)
+                                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, i),
+                                                      IMAGE_GET_BINARY_PIXEL_FAST(old_row, i), floating_threshold)) {
+                                    xylf_t context;
+                                    context.x = x;
+                                    context.y = y;
+                                    context.l = left;
+                                    context.r = right;
+                                    lifo_enqueue(&lifo, &context);
+                                    x = i;
+                                    y = y - 1;
+                                    recurse = true;
+                                    break;
+                                }
+                            }
+                            if (recurse) {
+                                break;
+                            }
+                        }
+
+                        if (y < (img->h - 1)) {
+                            row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(img, y + 1);
+                            out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y + 1);
+
+                            bool recurse = false;
+                            for (int i = left; i <= right; i++) {
+                                if ((!IMAGE_GET_BINARY_PIXEL_FAST(out_row, i))
+                                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, i), seed_pixel, seed_threshold)
+                                && COLOR_BOUND_BINARY(IMAGE_GET_BINARY_PIXEL_FAST(row, i),
+                                                      IMAGE_GET_BINARY_PIXEL_FAST(old_row, i), floating_threshold)) {
+                                    xylf_t context;
+                                    context.x = x;
+                                    context.y = y;
+                                    context.l = left;
+                                    context.r = right;
+                                    lifo_enqueue(&lifo, &context);
+                                    x = i;
+                                    y = y + 1;
+                                    recurse = true;
+                                    break;
+                                }
+                            }
+                            if (recurse) {
+                                break;
+                            }
+                        }
+                    }
+
+                    if (cb) cb(img, y, left, right, data);
+
+                    if (!lifo_size(&lifo)) {
+                        break_out = true;
+                        break;
+                    }
+
+                    xylf_t context;
+                    lifo_dequeue(&lifo, &context);
+                    x = context.x;
+                    y = context.y;
+                    left = context.l;
+                    right = context.r;
+                }
+
+                if (break_out) {
+                    break;
+                }
+            }
+            break;
+        }
+        case IMAGE_BPP_GRAYSCALE: {
+            for(int seed_pixel = IMAGE_GET_GRAYSCALE_PIXEL(img, x, y);;) {
+                int left = x, right = x;
+                uint8_t *row = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(img, y);
+                uint32_t *out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y);
+
+                while ((left > 0)
+                && (!IMAGE_GET_BINARY_PIXEL_FAST(out_row, left - 1))
+                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, left - 1), seed_pixel, seed_threshold)
+                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, left - 1),
+                                         IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, left), floating_threshold)) {
+                    left--;
+                }
+
+                while ((right < (img->w - 1))
+                && (!IMAGE_GET_BINARY_PIXEL_FAST(out_row, right + 1))
+                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, right + 1), seed_pixel, seed_threshold)
+                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, right + 1),
+                                         IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, right), floating_threshold)) {
+                    right++;
+                }
+
+                for (int i = left; i <= right; i++) {
+                    IMAGE_SET_BINARY_PIXEL_FAST(out_row, i);
+                }
+
+                bool break_out = false;
+                for(;;) {
+                    if (lifo_size(&lifo) < lifo_len) {
+                        uint8_t *old_row = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(img, y);
+
+                        if (y > 0) {
+                            row = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(img, y - 1);
+                            out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y - 1);
+
+                            bool recurse = false;
+                            for (int i = left; i <= right; i++) {
+                                if ((!IMAGE_GET_BINARY_PIXEL_FAST(out_row, i))
+                                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, i), seed_pixel, seed_threshold)
+                                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, i),
+                                                         IMAGE_GET_GRAYSCALE_PIXEL_FAST(old_row, i), floating_threshold)) {
+                                    xylf_t context;
+                                    context.x = x;
+                                    context.y = y;
+                                    context.l = left;
+                                    context.r = right;
+                                    lifo_enqueue(&lifo, &context);
+                                    x = i;
+                                    y = y - 1;
+                                    recurse = true;
+                                    break;
+                                }
+                            }
+                            if (recurse) {
+                                break;
+                            }
+                        }
+
+                        if (y < (img->h - 1)) {
+                            row = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(img, y + 1);
+                            out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y + 1);
+
+                            bool recurse = false;
+                            for (int i = left; i <= right; i++) {
+                                if ((!IMAGE_GET_BINARY_PIXEL_FAST(out_row, i))
+                                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, i), seed_pixel, seed_threshold)
+                                && COLOR_BOUND_GRAYSCALE(IMAGE_GET_GRAYSCALE_PIXEL_FAST(row, i),
+                                                         IMAGE_GET_GRAYSCALE_PIXEL_FAST(old_row, i), floating_threshold)) {
+                                    xylf_t context;
+                                    context.x = x;
+                                    context.y = y;
+                                    context.l = left;
+                                    context.r = right;
+                                    lifo_enqueue(&lifo, &context);
+                                    x = i;
+                                    y = y + 1;
+                                    recurse = true;
+                                    break;
+                                }
+                            }
+                            if (recurse) {
+                                break;
+                            }
+                        }
+                    }
+
+                    if (cb) cb(img, y, left, right, data);
+
+                    if (!lifo_size(&lifo)) {
+                        break_out = true;
+                        break;
+                    }
+
+                    xylf_t context;
+                    lifo_dequeue(&lifo, &context);
+                    x = context.x;
+                    y = context.y;
+                    left = context.l;
+                    right = context.r;
+                }
+
+                if (break_out) {
+                    break;
+                }
+            }
+            break;
+        }
+        case IMAGE_BPP_RGB565: {
+            for(int seed_pixel = IMAGE_GET_RGB565_PIXEL(img, x, y);;) {
+                int left = x, right = x;
+                uint16_t *row = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(img, y);
+                uint32_t *out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y);
+
+                while ((left > 0)
+                && (!IMAGE_GET_BINARY_PIXEL_FAST(out_row, left - 1))
+                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, left - 1), seed_pixel, seed_threshold)
+                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, left - 1),
+                                      IMAGE_GET_RGB565_PIXEL_FAST(row, left), floating_threshold)) {
+                    left--;
+                }
+
+                while ((right < (img->w - 1))
+                && (!IMAGE_GET_BINARY_PIXEL_FAST(out_row, right + 1))
+                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, right + 1), seed_pixel, seed_threshold)
+                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, right + 1),
+                                      IMAGE_GET_RGB565_PIXEL_FAST(row, right), floating_threshold)) {
+                    right++;
+                }
+
+                for (int i = left; i <= right; i++) {
+                    IMAGE_SET_BINARY_PIXEL_FAST(out_row, i);
+                }
+
+                bool break_out = false;
+                for(;;) {
+                    if (lifo_size(&lifo) < lifo_len) {
+                        uint16_t *old_row = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(img, y);
+
+                        if (y > 0) {
+                            row = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(img, y - 1);
+                            out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y - 1);
+
+                            bool recurse = false;
+                            for (int i = left; i <= right; i++) {
+                                if ((!IMAGE_GET_BINARY_PIXEL_FAST(out_row, i))
+                                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, i), seed_pixel, seed_threshold)
+                                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, i),
+                                                      IMAGE_GET_RGB565_PIXEL_FAST(old_row, i), floating_threshold)) {
+                                    xylf_t context;
+                                    context.x = x;
+                                    context.y = y;
+                                    context.l = left;
+                                    context.r = right;
+                                    lifo_enqueue(&lifo, &context);
+                                    x = i;
+                                    y = y - 1;
+                                    recurse = true;
+                                    break;
+                                }
+                            }
+                            if (recurse) {
+                                break;
+                            }
+                        }
+
+                        if (y < (img->h - 1)) {
+                            row = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(img, y + 1);
+                            out_row = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(out, y + 1);
+
+                            bool recurse = false;
+                            for (int i = left; i <= right; i++) {
+                                if ((!IMAGE_GET_BINARY_PIXEL_FAST(out_row, i))
+                                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, i), seed_pixel, seed_threshold)
+                                && COLOR_BOUND_RGB565(IMAGE_GET_RGB565_PIXEL_FAST(row, i),
+                                                      IMAGE_GET_RGB565_PIXEL_FAST(old_row, i), floating_threshold)) {
+                                    xylf_t context;
+                                    context.x = x;
+                                    context.y = y;
+                                    context.l = left;
+                                    context.r = right;
+                                    lifo_enqueue(&lifo, &context);
+                                    x = i;
+                                    y = y + 1;
+                                    recurse = true;
+                                    break;
+                                }
+                            }
+                            if (recurse) {
+                                break;
+                            }
+                        }
+                    }
+
+                    if (cb) cb(img, y, left, right, data);
+
+                    if (!lifo_size(&lifo)) {
+                        break_out = true;
+                        break;
+                    }
+
+                    xylf_t context;
+                    lifo_dequeue(&lifo, &context);
+                    x = context.x;
+                    y = context.y;
+                    left = context.l;
+                    right = context.r;
+                }
+
+                if (break_out) {
+                    break;
+                }
+            }
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+
+    lifo_free(&lifo);
 }

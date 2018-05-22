@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include "imlib.h"
 
+#ifdef IMLIB_ENABLE_APRILTAGS
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-variable"
 
@@ -41,886 +42,6 @@ The views and conclusions contained in the software and documentation are those
 of the authors and should not be interpreted as representing official policies,
 either expressed or implied, of the Regents of The University of Michigan.
 */
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-//////// "umm_malloc.h"
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-//The MIT License (MIT)
-
-//Copyright (c) 2015 Ralph Hempel
-
-//Permission is hereby granted, free of charge, to any person obtaining a copy
-//of this software and associated documentation files (the "Software"), to deal
-//in the Software without restriction, including without limitation the rights
-//to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-//copies of the Software, and to permit persons to whom the Software is
-//furnished to do so, subject to the following conditions:
-
-//The above copyright notice and this permission notice shall be included in all
-//copies or substantial portions of the Software.
-
-//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-//SOFTWARE.
-
-/* ----------------------------------------------------------------------------
- * umm_malloc.h - a memory allocator for embedded systems (microcontrollers)
- *
- * See copyright notice in LICENSE.TXT
- * ----------------------------------------------------------------------------
- */
-
-
-/* ------------------------------------------------------------------------ */
-
-void  umm_init( void );
-void *umm_malloc( size_t size );
-void *umm_calloc( size_t num, size_t size );
-void *umm_realloc( void *ptr, size_t size );
-void  umm_free( void *ptr );
-
-
-/* ------------------------------------------------------------------------ */
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-//////// "umm_malloc.c"
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-//The MIT License (MIT)
-
-//Copyright (c) 2015 Ralph Hempel
-
-//Permission is hereby granted, free of charge, to any person obtaining a copy
-//of this software and associated documentation files (the "Software"), to deal
-//in the Software without restriction, including without limitation the rights
-//to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-//copies of the Software, and to permit persons to whom the Software is
-//furnished to do so, subject to the following conditions:
-
-//The above copyright notice and this permission notice shall be included in all
-//copies or substantial portions of the Software.
-
-//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-//SOFTWARE.
-
-/* ----------------------------------------------------------------------------
- * umm_malloc.c - a memory allocator for embedded systems (microcontrollers)
- *
- * See LICENSE for copyright notice
- * See README.md for acknowledgements and description of internals
- * ----------------------------------------------------------------------------
- *
- * R.Hempel 2007-09-22 - Original
- * R.Hempel 2008-12-11 - Added MIT License biolerplate
- *                     - realloc() now looks to see if previous block is free
- *                     - made common operations functions
- * R.Hempel 2009-03-02 - Added macros to disable tasking
- *                     - Added function to dump heap and check for valid free
- *                        pointer
- * R.Hempel 2009-03-09 - Changed name to umm_malloc to avoid conflicts with
- *                        the mm_malloc() library functions
- *                     - Added some test code to assimilate a free block
- *                        with the very block if possible. Complicated and
- *                        not worth the grief.
- * D.Frank 2014-04-02  - Fixed heap configuration when UMM_TEST_MAIN is NOT set,
- *                        added user-dependent configuration file umm_malloc_cfg.h
- * R.Hempel 2016-12-04 - Add support for Unity test framework
- *                     - Reorganize source files to avoid redundant content
- *                     - Move integrity and poison checking to separate file
- * ----------------------------------------------------------------------------
- */
-
-/* A couple of macros to make packing structures less compiler dependent */
-
-#define UMM_H_ATTPACKPRE
-#define UMM_H_ATTPACKSUF __attribute__((__packed__))
-
-#define UMM_BEST_FIT
-#undef  UMM_FIRST_FIT
-
-/*
- * A couple of macros to make it easier to protect the memory allocator
- * in a multitasking system. You should set these macros up to use whatever
- * your system uses for this purpose. You can disable interrupts entirely, or
- * just disable task switching - it's up to you
- *
- * NOTE WELL that these macros MUST be allowed to nest, because umm_free() is
- * called from within umm_malloc()
- */
-
-#define UMM_CRITICAL_ENTRY()
-#define UMM_CRITICAL_EXIT()
-
-#define DBGLOG_TRACE(format, ...)
-
-#define DBGLOG_DEBUG(format, ...)
-
-/* ------------------------------------------------------------------------- */
-
-UMM_H_ATTPACKPRE typedef struct umm_ptr_t {
-  unsigned short int next;
-  unsigned short int prev;
-} UMM_H_ATTPACKSUF umm_ptr;
-
-
-UMM_H_ATTPACKPRE typedef struct umm_block_t {
-  union {
-    umm_ptr used;
-  } header;
-  union {
-    umm_ptr free;
-    unsigned char data[16];
-  } body;
-} UMM_H_ATTPACKSUF umm_block;
-
-#define UMM_FREELIST_MASK (0x8000)
-#define UMM_BLOCKNO_MASK  (0x7FFF)
-
-/* ------------------------------------------------------------------------- */
-
-umm_block *umm_heap = NULL;
-unsigned short int umm_numblocks = 0;
-
-#define UMM_NUMBLOCKS (umm_numblocks)
-
-/* ------------------------------------------------------------------------ */
-
-#define UMM_BLOCK(b)  (umm_heap[b])
-
-#define UMM_NBLOCK(b) (UMM_BLOCK(b).header.used.next)
-#define UMM_PBLOCK(b) (UMM_BLOCK(b).header.used.prev)
-#define UMM_NFREE(b)  (UMM_BLOCK(b).body.free.next)
-#define UMM_PFREE(b)  (UMM_BLOCK(b).body.free.prev)
-#define UMM_DATA(b)   (UMM_BLOCK(b).body.data)
-
-/* ------------------------------------------------------------------------ */
-
-static unsigned short int umm_blocks( size_t size ) {
-
-  /*
-   * The calculation of the block size is not too difficult, but there are
-   * a few little things that we need to be mindful of.
-   *
-   * When a block removed from the free list, the space used by the free
-   * pointers is available for data. That's what the first calculation
-   * of size is doing.
-   */
-
-  if( size <= (sizeof(((umm_block *)0)->body)) )
-    return( 1 );
-
-  /*
-   * If it's for more than that, then we need to figure out the number of
-   * additional whole blocks the size of an umm_block are required.
-   */
-
-  size -= ( 1 + (sizeof(((umm_block *)0)->body)) );
-
-  return( 2 + size/(sizeof(umm_block)) );
-}
-
-/* ------------------------------------------------------------------------ */
-/*
- * Split the block `c` into two blocks: `c` and `c + blocks`.
- *
- * - `cur_freemask` should be `0` if `c` used, or `UMM_FREELIST_MASK`
- *   otherwise.
- * - `new_freemask` should be `0` if `c + blocks` used, or `UMM_FREELIST_MASK`
- *   otherwise.
- *
- * Note that free pointers are NOT modified by this function.
- */
-static void umm_split_block( unsigned short int c,
-    unsigned short int blocks,
-    unsigned short int new_freemask ) {
-
-  UMM_NBLOCK(c+blocks) = (UMM_NBLOCK(c) & UMM_BLOCKNO_MASK) | new_freemask;
-  UMM_PBLOCK(c+blocks) = c;
-
-  UMM_PBLOCK(UMM_NBLOCK(c) & UMM_BLOCKNO_MASK) = (c+blocks);
-  UMM_NBLOCK(c)                                = (c+blocks);
-}
-
-/* ------------------------------------------------------------------------ */
-
-static void umm_disconnect_from_free_list( unsigned short int c ) {
-  /* Disconnect this block from the FREE list */
-
-  UMM_NFREE(UMM_PFREE(c)) = UMM_NFREE(c);
-  UMM_PFREE(UMM_NFREE(c)) = UMM_PFREE(c);
-
-  /* And clear the free block indicator */
-
-  UMM_NBLOCK(c) &= (~UMM_FREELIST_MASK);
-}
-
-/* ------------------------------------------------------------------------ */
-
-static void umm_assimilate_up( unsigned short int c ) {
-
-  if( UMM_NBLOCK(UMM_NBLOCK(c)) & UMM_FREELIST_MASK ) {
-    /*
-     * The next block is a free block, so assimilate up and remove it from
-     * the free list
-     */
-
-    DBGLOG_DEBUG( "Assimilate up to next block, which is FREE\n" );
-
-    /* Disconnect the next block from the FREE list */
-
-    umm_disconnect_from_free_list( UMM_NBLOCK(c) );
-
-    /* Assimilate the next block with this one */
-
-    UMM_PBLOCK(UMM_NBLOCK(UMM_NBLOCK(c)) & UMM_BLOCKNO_MASK) = c;
-    UMM_NBLOCK(c) = UMM_NBLOCK(UMM_NBLOCK(c)) & UMM_BLOCKNO_MASK;
-  }
-}
-
-/* ------------------------------------------------------------------------ */
-
-static unsigned short int umm_assimilate_down( unsigned short int c, unsigned short int freemask ) {
-
-  UMM_NBLOCK(UMM_PBLOCK(c)) = UMM_NBLOCK(c) | freemask;
-  UMM_PBLOCK(UMM_NBLOCK(c)) = UMM_PBLOCK(c);
-
-  return( UMM_PBLOCK(c) );
-}
-
-/* ------------------------------------------------------------------------- */
-
-void umm_init_x( int w, int h ) {
-  uint32_t UMM_MALLOC_CFG_HEAP_SIZE = ((w * h * (8 + 1)) / sizeof(size_t)) * sizeof(size_t);
-  if (UMM_MALLOC_CFG_HEAP_SIZE < (sizeof(umm_block) * 128)) fb_alloc_fail();
-  if (UMM_MALLOC_CFG_HEAP_SIZE > (sizeof(umm_block) * 32768)) UMM_MALLOC_CFG_HEAP_SIZE = sizeof(umm_block) * 32768;
-  void *UMM_MALLOC_CFG_HEAP_ADDR = fb_alloc(UMM_MALLOC_CFG_HEAP_SIZE);
-  /* init heap pointer and size, and memset it to 0 */
-  umm_heap = (umm_block *)UMM_MALLOC_CFG_HEAP_ADDR;
-  umm_numblocks = (UMM_MALLOC_CFG_HEAP_SIZE / sizeof(umm_block));
-  memset(umm_heap, 0x00, UMM_MALLOC_CFG_HEAP_SIZE);
-
-  /* setup initial blank heap structure */
-  {
-    /* index of the 0th `umm_block` */
-    const unsigned short int block_0th = 0;
-    /* index of the 1st `umm_block` */
-    const unsigned short int block_1th = 1;
-    /* index of the latest `umm_block` */
-    const unsigned short int block_last = UMM_NUMBLOCKS - 1;
-
-    /* setup the 0th `umm_block`, which just points to the 1st */
-    UMM_NBLOCK(block_0th) = block_1th;
-    UMM_NFREE(block_0th)  = block_1th;
-    UMM_PFREE(block_0th)  = block_1th;
-
-    /*
-     * Now, we need to set the whole heap space as a huge free block. We should
-     * not touch the 0th `umm_block`, since it's special: the 0th `umm_block`
-     * is the head of the free block list. It's a part of the heap invariant.
-     *
-     * See the detailed explanation at the beginning of the file.
-     */
-
-    /*
-     * 1th `umm_block` has pointers:
-     *
-     * - next `umm_block`: the latest one
-     * - prev `umm_block`: the 0th
-     *
-     * Plus, it's a free `umm_block`, so we need to apply `UMM_FREELIST_MASK`
-     *
-     * And it's the last free block, so the next free block is 0.
-     */
-    UMM_NBLOCK(block_1th) = block_last | UMM_FREELIST_MASK;
-    UMM_NFREE(block_1th)  = 0;
-    UMM_PBLOCK(block_1th) = block_0th;
-    UMM_PFREE(block_1th)  = block_0th;
-
-    /*
-     * latest `umm_block` has pointers:
-     *
-     * - next `umm_block`: 0 (meaning, there are no more `umm_blocks`)
-     * - prev `umm_block`: the 1st
-     *
-     * It's not a free block, so we don't touch NFREE / PFREE at all.
-     */
-    UMM_NBLOCK(block_last) = 0;
-    UMM_PBLOCK(block_last) = block_1th;
-  }
-}
-
-void umm_init( void ) {
-    umm_init_x(0, 0);
-}
-
-/* ------------------------------------------------------------------------ */
-
-void umm_free( void *ptr ) {
-
-  unsigned short int c;
-
-  /* If we're being asked to free a NULL pointer, well that's just silly! */
-
-  if( (void *)0 == ptr ) {
-    DBGLOG_DEBUG( "free a null pointer -> do nothing\n" );
-
-    return;
-  }
-
-  /*
-   * FIXME: At some point it might be a good idea to add a check to make sure
-   *        that the pointer we're being asked to free up is actually within
-   *        the umm_heap!
-   *
-   * NOTE:  See the new umm_info() function that you can use to see if a ptr is
-   *        on the free list!
-   */
-
-  /* Protect the critical section... */
-  UMM_CRITICAL_ENTRY();
-
-  /* Figure out which block we're in. Note the use of truncated division... */
-
-  c = (((char *)ptr)-(char *)(&(umm_heap[0])))/sizeof(umm_block);
-
-  DBGLOG_DEBUG( "Freeing block %6i\n", c );
-
-  /* Now let's assimilate this block with the next one if possible. */
-
-  umm_assimilate_up( c );
-
-  /* Then assimilate with the previous block if possible */
-
-  if( UMM_NBLOCK(UMM_PBLOCK(c)) & UMM_FREELIST_MASK ) {
-
-    DBGLOG_DEBUG( "Assimilate down to next block, which is FREE\n" );
-
-    c = umm_assimilate_down(c, UMM_FREELIST_MASK);
-  } else {
-    /*
-     * The previous block is not a free block, so add this one to the head
-     * of the free list
-     */
-
-    DBGLOG_DEBUG( "Just add to head of free list\n" );
-
-    UMM_PFREE(UMM_NFREE(0)) = c;
-    UMM_NFREE(c)            = UMM_NFREE(0);
-    UMM_PFREE(c)            = 0;
-    UMM_NFREE(0)            = c;
-
-    UMM_NBLOCK(c)          |= UMM_FREELIST_MASK;
-  }
-
-  /* Release the critical section... */
-  UMM_CRITICAL_EXIT();
-}
-
-/* ------------------------------------------------------------------------ */
-
-void *umm_malloc( size_t size ) {
-  unsigned short int blocks;
-  unsigned short int blockSize = 0;
-
-  unsigned short int bestSize;
-  unsigned short int bestBlock;
-
-  unsigned short int cf;
-
-  if (umm_heap == NULL) {
-    umm_init();
-  }
-
-  /*
-   * the very first thing we do is figure out if we're being asked to allocate
-   * a size of 0 - and if we are we'll simply return a null pointer. if not
-   * then reduce the size by 1 byte so that the subsequent calculations on
-   * the number of blocks to allocate are easier...
-   */
-
-  if( 0 == size ) {
-    DBGLOG_DEBUG( "malloc a block of 0 bytes -> do nothing\n" );
-
-    return( (void *)NULL );
-  }
-
-  /* Protect the critical section... */
-  UMM_CRITICAL_ENTRY();
-
-  blocks = umm_blocks( size );
-
-  /*
-   * Now we can scan through the free list until we find a space that's big
-   * enough to hold the number of blocks we need.
-   *
-   * This part may be customized to be a best-fit, worst-fit, or first-fit
-   * algorithm
-   */
-
-  cf = UMM_NFREE(0);
-
-  bestBlock = UMM_NFREE(0);
-  bestSize  = 0x7FFF;
-
-  while( cf ) {
-    blockSize = (UMM_NBLOCK(cf) & UMM_BLOCKNO_MASK) - cf;
-
-    DBGLOG_TRACE( "Looking at block %6i size %6i\n", cf, blockSize );
-
-#if defined UMM_BEST_FIT
-    if( (blockSize >= blocks) && (blockSize < bestSize) ) {
-      bestBlock = cf;
-      bestSize  = blockSize;
-    }
-#elif defined UMM_FIRST_FIT
-    /* This is the first block that fits! */
-    if( (blockSize >= blocks) )
-      break;
-#else
-#  error "No UMM_*_FIT is defined - check umm_malloc_cfg.h"
-#endif
-
-    cf = UMM_NFREE(cf);
-  }
-
-  if( 0x7FFF != bestSize ) {
-    cf        = bestBlock;
-    blockSize = bestSize;
-  }
-
-  if( UMM_NBLOCK(cf) & UMM_BLOCKNO_MASK && blockSize >= blocks ) {
-    /*
-     * This is an existing block in the memory heap, we just need to split off
-     * what we need, unlink it from the free list and mark it as in use, and
-     * link the rest of the block back into the freelist as if it was a new
-     * block on the free list...
-     */
-
-    if( blockSize == blocks ) {
-      /* It's an exact fit and we don't neet to split off a block. */
-      DBGLOG_DEBUG( "Allocating %6i blocks starting at %6i - exact\n", blocks, cf );
-
-      /* Disconnect this block from the FREE list */
-
-      umm_disconnect_from_free_list( cf );
-
-    } else {
-      /* It's not an exact fit and we need to split off a block. */
-      DBGLOG_DEBUG( "Allocating %6i blocks starting at %6i - existing\n", blocks, cf );
-
-      /*
-       * split current free block `cf` into two blocks. The first one will be
-       * returned to user, so it's not free, and the second one will be free.
-       */
-      umm_split_block( cf, blocks,
-          UMM_FREELIST_MASK/*new block is free*/);
-
-      /*
-       * `umm_split_block()` does not update the free pointers (it affects
-       * only free flags), but effectively we've just moved beginning of the
-       * free block from `cf` to `cf + blocks`. So we have to adjust pointers
-       * to and from adjacent free blocks.
-       */
-
-      /* previous free block */
-      UMM_NFREE( UMM_PFREE(cf) ) = cf + blocks;
-      UMM_PFREE( cf + blocks ) = UMM_PFREE(cf);
-
-      /* next free block */
-      UMM_PFREE( UMM_NFREE(cf) ) = cf + blocks;
-      UMM_NFREE( cf + blocks ) = UMM_NFREE(cf);
-    }
-  } else {
-    /* Out of memory */
-
-    DBGLOG_DEBUG(  "Can't allocate %5i blocks\n", blocks );
-
-    /* Release the critical section... */
-    UMM_CRITICAL_EXIT();
-
-    return( (void *)NULL );
-  }
-
-  /* Release the critical section... */
-  UMM_CRITICAL_EXIT();
-
-  return( (void *)&UMM_DATA(cf) );
-}
-
-/* ------------------------------------------------------------------------ */
-
-void *umm_realloc( void *ptr, size_t size ) {
-
-  unsigned short int blocks;
-  unsigned short int blockSize;
-
-  unsigned short int c;
-
-  size_t curSize;
-
-  if (umm_heap == NULL) {
-    umm_init();
-  }
-
-  /*
-   * This code looks after the case of a NULL value for ptr. The ANSI C
-   * standard says that if ptr is NULL and size is non-zero, then we've
-   * got to work the same a malloc(). If size is also 0, then our version
-   * of malloc() returns a NULL pointer, which is OK as far as the ANSI C
-   * standard is concerned.
-   */
-
-  if( ((void *)NULL == ptr) ) {
-    DBGLOG_DEBUG( "realloc the NULL pointer - call malloc()\n" );
-
-    return( umm_malloc(size) );
-  }
-
-  /*
-   * Now we're sure that we have a non_NULL ptr, but we're not sure what
-   * we should do with it. If the size is 0, then the ANSI C standard says that
-   * we should operate the same as free.
-   */
-
-  if( 0 == size ) {
-    DBGLOG_DEBUG( "realloc to 0 size, just free the block\n" );
-
-    umm_free( ptr );
-
-    return( (void *)NULL );
-  }
-
-  /* Protect the critical section... */
-  UMM_CRITICAL_ENTRY();
-
-  /*
-   * Otherwise we need to actually do a reallocation. A naiive approach
-   * would be to malloc() a new block of the correct size, copy the old data
-   * to the new block, and then free the old block.
-   *
-   * While this will work, we end up doing a lot of possibly unnecessary
-   * copying. So first, let's figure out how many blocks we'll need.
-   */
-
-  blocks = umm_blocks( size );
-
-  /* Figure out which block we're in. Note the use of truncated division... */
-
-  c = (((char *)ptr)-(char *)(&(umm_heap[0])))/sizeof(umm_block);
-
-  /* Figure out how big this block is... */
-
-  blockSize = (UMM_NBLOCK(c) - c);
-
-  /* Figure out how many bytes are in this block */
-
-  curSize   = (blockSize*sizeof(umm_block))-(sizeof(((umm_block *)0)->header));
-
-  /*
-   * Ok, now that we're here, we know the block number of the original chunk
-   * of memory, and we know how much new memory we want, and we know the original
-   * block size...
-   */
-
-  if( blockSize == blocks ) {
-    /* This space intentionally left blank - return the original pointer! */
-
-    DBGLOG_DEBUG( "realloc the same size block - %i, do nothing\n", blocks );
-
-    /* Release the critical section... */
-    UMM_CRITICAL_EXIT();
-
-    return( ptr );
-  }
-
-  /*
-   * Now we have a block size that could be bigger or smaller. Either
-   * way, try to assimilate up to the next block before doing anything...
-   *
-   * If it's still too small, we have to free it anyways and it will save the
-   * assimilation step later in free :-)
-   */
-
-  umm_assimilate_up( c );
-
-  /*
-   * Now check if it might help to assimilate down, but don't actually
-   * do the downward assimilation unless the resulting block will hold the
-   * new request! If this block of code runs, then the new block will
-   * either fit the request exactly, or be larger than the request.
-   */
-
-  if( (UMM_NBLOCK(UMM_PBLOCK(c)) & UMM_FREELIST_MASK) &&
-      (blocks <= (UMM_NBLOCK(c)-UMM_PBLOCK(c)))    ) {
-
-    /* Check if the resulting block would be big enough... */
-
-    DBGLOG_DEBUG( "realloc() could assimilate down %i blocks - fits!\n\r", c-UMM_PBLOCK(c) );
-
-    /* Disconnect the previous block from the FREE list */
-
-    umm_disconnect_from_free_list( UMM_PBLOCK(c) );
-
-    /*
-     * Connect the previous block to the next block ... and then
-     * realign the current block pointer
-     */
-
-    c = umm_assimilate_down(c, 0);
-
-    /*
-     * Move the bytes down to the new block we just created, but be sure to move
-     * only the original bytes.
-     */
-
-    memmove( (void *)&UMM_DATA(c), ptr, curSize );
-
-    /* And don't forget to adjust the pointer to the new block location! */
-
-    ptr    = (void *)&UMM_DATA(c);
-  }
-
-  /* Now calculate the block size again...and we'll have three cases */
-
-  blockSize = (UMM_NBLOCK(c) - c);
-
-  if( blockSize == blocks ) {
-    /* This space intentionally left blank - return the original pointer! */
-
-    DBGLOG_DEBUG( "realloc the same size block - %i, do nothing\n", blocks );
-
-  } else if (blockSize > blocks ) {
-    /*
-     * New block is smaller than the old block, so just make a new block
-     * at the end of this one and put it up on the free list...
-     */
-
-    DBGLOG_DEBUG( "realloc %i to a smaller block %i, shrink and free the leftover bits\n", blockSize, blocks );
-
-    umm_split_block( c, blocks, 0 );
-    umm_free( (void *)&UMM_DATA(c+blocks) );
-  } else {
-    /* New block is bigger than the old block... */
-
-    void *oldptr = ptr;
-
-    DBGLOG_DEBUG( "realloc %i to a bigger block %i, make new, copy, and free the old\n", blockSize, blocks );
-
-    /*
-     * Now umm_malloc() a new one, copy the old data to the new block, and
-     * free up the old block, but only if the malloc was sucessful!
-     */
-
-    if( (ptr = umm_malloc( size )) ) {
-      memcpy( ptr, oldptr, curSize );
-    }
-
-    umm_free( oldptr );
-  }
-
-  /* Release the critical section... */
-  UMM_CRITICAL_EXIT();
-
-  return( ptr );
-}
-
-/* ------------------------------------------------------------------------ */
-
-void *umm_calloc( size_t num, size_t item_size ) {
-  void *ret;
-
-  ret = umm_malloc((size_t)(item_size * num));
-  if (ret)
-      memset(ret, 0x00, (size_t)(item_size * num));
-
-  return ret;
-}
-
-/* ------------------------------------------------------------------------ */
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-// https://github.com/01org/linux-sgx/blob/master/sdk/tlibc/stdlib/qsort.c
-
-/*-
- * Copyright (c) 1992, 1993
- *      The Regents of the University of California.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the University nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
-static __inline char    *med3(char *, char *, char *, int (*)(const void *, const void *));
-static __inline void     swapfunc(char *, char *, size_t, int);
-
-#define min(a, b)       (a) < (b) ? a : b
-
-/*
- * Qsort routine from Bentley & McIlroy's "Engineering a Sort Function".
- */
-#define swapcode(TYPE, parmi, parmj, n) {               \
-        size_t i = (n) / sizeof (TYPE);                 \
-        TYPE *pi = (TYPE *) (parmi);                    \
-        TYPE *pj = (TYPE *) (parmj);                    \
-        do {                                            \
-                TYPE    t = *pi;                        \
-                *pi++ = *pj;                            \
-                *pj++ = t;                              \
-        } while (--i > 0);                              \
-}
-
-#define SWAPINIT(a, es) swaptype = ((char *)a - (char *)0) % sizeof(long) || \
-        es % sizeof(long) ? 2 : es == sizeof(long)? 0 : 1;
-
-static __inline void
-swapfunc(char *a, char *b, size_t n, int swaptype)
-{
-        if (swaptype <= 1)
-                swapcode(long, a, b, n)
-        else
-                swapcode(char, a, b, n)
-}
-
-#define swap(a, b)                                      \
-        if (swaptype == 0) {                            \
-                long t = *(long *)(a);                  \
-                *(long *)(a) = *(long *)(b);            \
-                *(long *)(b) = t;                       \
-        } else                                          \
-                swapfunc(a, b, es, swaptype)
-
-#define vecswap(a, b, n)        if ((n) > 0) swapfunc(a, b, n, swaptype)
-
-static __inline char *
-med3(char *a, char *b, char *c, int (*cmp)(const void *, const void *))
-{
-        return cmp(a, b) < 0 ?
-               (cmp(b, c) < 0 ? b : (cmp(a, c) < 0 ? c : a ))
-              :(cmp(b, c) > 0 ? b : (cmp(a, c) < 0 ? a : c ));
-}
-
-/* Disable warnings */
-
-void
-qsort(void *aa, size_t n, size_t es, int (*cmp)(const void *, const void *))
-{
-        char *pa, *pb, *pc, *pd, *pl, *pm, *pn;
-        int cmp_result, swaptype, swap_cnt;
-        size_t d, r;
-        char *a = (char *)aa;
-
-loop:   SWAPINIT(a, es);
-        swap_cnt = 0;
-        if (n < 7) {
-                for (pm = (char *)a + es; pm < (char *) a + n * es; pm += es)
-                        for (pl = pm; pl > (char *) a && cmp(pl - es, pl) > 0;
-                             pl -= es)
-                                swap(pl, pl - es);
-                return;
-        }
-        pm = (char *)a + (n / 2) * es;
-        if (n > 7) {
-                pl = (char *)a;
-                pn = (char *)a + (n - 1) * es;
-                if (n > 40) {
-                        d = (n / 8) * es;
-                        pl = med3(pl, pl + d, pl + 2 * d, cmp);
-                        pm = med3(pm - d, pm, pm + d, cmp);
-                        pn = med3(pn - 2 * d, pn - d, pn, cmp);
-                }
-                pm = med3(pl, pm, pn, cmp);
-        }
-        swap(a, pm);
-        pa = pb = (char *)a + es;
-
-        pc = pd = (char *)a + (n - 1) * es;
-        for (;;) {
-                while (pb <= pc && (cmp_result = cmp(pb, a)) <= 0) {
-                        if (cmp_result == 0) {
-                                swap_cnt = 1;
-                                swap(pa, pb);
-                                pa += es;
-                        }
-                        pb += es;
-                }
-                while (pb <= pc && (cmp_result = cmp(pc, a)) >= 0) {
-                        if (cmp_result == 0) {
-                                swap_cnt = 1;
-                                swap(pc, pd);
-                                pd -= es;
-                        }
-                        pc -= es;
-                }
-                if (pb > pc)
-                        break;
-                swap(pb, pc);
-                swap_cnt = 1;
-                pb += es;
-                pc -= es;
-        }
-        if (swap_cnt == 0) {  /* Switch to insertion sort */
-                for (pm = (char *) a + es; pm < (char *) a + n * es; pm += es)
-                        for (pl = pm; pl > (char *) a && cmp(pl - es, pl) > 0;
-                             pl -= es)
-                                swap(pl, pl - es);
-                return;
-        }
-
-        pn = (char *)a + n * es;
-        r = min(pa - (char *)a, pb - pa);
-        vecswap(a, pb - r, r);
-        r = min(pd - pc, pn - pd - es);
-        vecswap(pb, pn - r, r);
-        if ((r = pb - pa) > es)
-                qsort(a, r / es, es, cmp);
-        if ((r = pd - pc) > es) {
-                /* Iterate rather than recurse to save stack space */
-                a = pn - r;
-                n = r / es;
-                goto loop;
-        }
-/*              qsort(pn - r, r / es, es, cmp);*/
-}
-
-#undef min
-#undef swapcode
-#undef SWAPINIT
-#undef swap
-#undef vecswap
-
 #define printf(format, ...)
 #define fprintf(format, ...)
 #define free(ptr) ({ umm_free(ptr); })
@@ -10588,7 +9709,7 @@ int quad_segment_maxima(apriltag_detector_t *td, zarray_t *cluster, struct line_
 }
 
 // return 1 if the quad looks okay, 0 if it should be discarded
-int fit_quad(apriltag_detector_t *td, image_u8_t *im, zarray_t *cluster, struct quad *quad)
+int fit_quad(apriltag_detector_t *td, image_u8_t *im, zarray_t *cluster, struct quad *quad, bool overrideMode)
 {
     int res = 0;
 
@@ -10640,7 +9761,7 @@ int fit_quad(apriltag_detector_t *td, image_u8_t *im, zarray_t *cluster, struct 
     }
 
     // Ensure that the black border is inside the white border.
-    if (dot < 0)
+    if ((!overrideMode) && (dot < 0))
         return 0;
 
     // we now sort the points according to theta. This is a prepatory
@@ -11258,7 +10379,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
     return threshim;
 }
 
-zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
+zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, bool overrideMode)
 {
     ////////////////////////////////////////////////////////
     // step 1. threshold the image, creating the edge image.
@@ -11426,7 +10547,7 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
             struct quad quad;
             memset(&quad, 0, sizeof(struct quad));
 
-            if (fit_quad(td, im, cluster, &quad)) {
+            if (fit_quad(td, im, cluster, &quad, overrideMode)) {
 
                 zarray_add_fail_ok(quads, &quad);
             }
@@ -12287,7 +11408,7 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
     // and blurring parameters.
 
 //    zarray_t *quads = apriltag_quad_gradient(td, im_orig);
-    zarray_t *quads = apriltag_quad_thresh(td, im_orig);
+    zarray_t *quads = apriltag_quad_thresh(td, im_orig, false);
 
     zarray_t *detections = zarray_create(sizeof(apriltag_detection_t*));
 
@@ -12508,7 +11629,13 @@ void apriltag_detections_destroy(zarray_t *detections)
 void imlib_find_apriltags(list_t *out, image_t *ptr, rectangle_t *roi, apriltag_families_t families,
                           float fx, float fy, float cx, float cy)
 {
-    umm_init_x(roi->w, roi->h);
+    // Frame Buffer Memory Usage...
+    // -> GRAYSCALE Input Image = w*h*1
+    // -> GRAYSCALE Threhsolded Image = w*h*1
+    // -> UnionFind = w*h*4 (+w*h*2 for hash table)
+    size_t resolution = roi->w * roi->h;
+    size_t fb_alloc_need = resolution * (1 + 1 + 4 + 2); // read above...
+    umm_init_x(((fb_avail() - fb_alloc_need) / resolution) * resolution);
     apriltag_detector_t *td = apriltag_detector_create();
 
     if (families & TAG16H5) {
@@ -12593,6 +11720,16 @@ void imlib_find_apriltags(list_t *out, image_t *ptr, rectangle_t *roi, apriltag_
             rectangle_united(&(lnk_data.rect), &temp);
         }
 
+        // Add corners...
+        lnk_data.corners[0].x = fast_roundf(det->p[3][0]) + roi->x; // top-left
+        lnk_data.corners[0].y = fast_roundf(det->p[3][1]) + roi->y; // top-left
+        lnk_data.corners[1].x = fast_roundf(det->p[2][0]) + roi->x; // top-right
+        lnk_data.corners[1].y = fast_roundf(det->p[2][1]) + roi->y; // top-right
+        lnk_data.corners[2].x = fast_roundf(det->p[1][0]) + roi->x; // bottom-right
+        lnk_data.corners[2].y = fast_roundf(det->p[1][1]) + roi->y; // bottom-right
+        lnk_data.corners[3].x = fast_roundf(det->p[0][0]) + roi->x; // bottom-left
+        lnk_data.corners[3].y = fast_roundf(det->p[0][1]) + roi->y; // bottom-left
+
         lnk_data.id = det->id;
         lnk_data.family = 0;
 
@@ -12643,7 +11780,382 @@ void imlib_find_apriltags(list_t *out, image_t *ptr, rectangle_t *roi, apriltag_
     apriltag_detections_destroy(detections);
     fb_free(); // grayscale_image;
     apriltag_detector_destroy(td);
-    fb_free(); // umm_init();
+    fb_free(); // umm_init_x();
 }
 
+#ifdef IMLIB_ENABLE_FIND_RECTS
+void imlib_find_rects(list_t *out, image_t *ptr, rectangle_t *roi, uint32_t threshold)
+{
+    // Frame Buffer Memory Usage...
+    // -> GRAYSCALE Input Image = w*h*1
+    // -> GRAYSCALE Threhsolded Image = w*h*1
+    // -> UnionFind = w*h*4 (+w*h*2 for hash table)
+    size_t resolution = roi->w * roi->h;
+    size_t fb_alloc_need = resolution * (1 + 1 + 4 + 2); // read above...
+    umm_init_x(((fb_avail() - fb_alloc_need) / resolution) * resolution);
+    apriltag_detector_t *td = apriltag_detector_create();
+
+    uint8_t *grayscale_image = fb_alloc(roi->w * roi->h);
+
+    image_u8_t im;
+    im.width = roi->w;
+    im.height = roi->h;
+    im.stride = roi->w;
+    im.buf = grayscale_image;
+
+    switch(ptr->bpp) {
+        case IMAGE_BPP_BINARY: {
+            for (int y = roi->y, yy = roi->y + roi->h; y < yy; y++) {
+                uint32_t *row_ptr = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(ptr, y);
+                for (int x = roi->x, xx = roi->x + roi->w; x < xx; x++) {
+                    *(grayscale_image++) = COLOR_BINARY_TO_GRAYSCALE(IMAGE_GET_BINARY_PIXEL_FAST(row_ptr, x));
+                }
+            }
+            break;
+        }
+        case IMAGE_BPP_GRAYSCALE: {
+            for (int y = roi->y, yy = roi->y + roi->h; y < yy; y++) {
+                uint8_t *row_ptr = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(ptr, y);
+                for (int x = roi->x, xx = roi->x + roi->w; x < xx; x++) {
+                    *(grayscale_image++) = IMAGE_GET_GRAYSCALE_PIXEL_FAST(row_ptr, x);
+                }
+            }
+            break;
+        }
+        case IMAGE_BPP_RGB565: {
+            for (int y = roi->y, yy = roi->y + roi->h; y < yy; y++) {
+                uint16_t *row_ptr = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(ptr, y);
+                for (int x = roi->x, xx = roi->x + roi->w; x < xx; x++) {
+                    *(grayscale_image++) = COLOR_RGB565_TO_GRAYSCALE(IMAGE_GET_RGB565_PIXEL_FAST(row_ptr, x));
+                }
+            }
+            break;
+        }
+        default: {
+            memset(grayscale_image, 0, roi->w * roi->h);
+            break;
+        }
+    }
+
+    ///////////////////////////////////////////////////////////
+    // Detect quads according to requested image decimation
+    // and blurring parameters.
+
+//    zarray_t *detections = apriltag_quad_gradient(td, &im, true);
+    zarray_t *detections = apriltag_quad_thresh(td, &im, true);
+
+    td->nquads = zarray_size(detections);
+
+    ////////////////////////////////////////////////////////////////
+    // Decode tags from each quad.
+    if (1) {
+        for (int i = 0; i < zarray_size(detections); i++) {
+            struct quad *quad_original;
+            zarray_get_volatile(detections, i, &quad_original);
+
+            // refine edges is not dependent upon the tag family, thus
+            // apply this optimization BEFORE the other work.
+            //if (td->quad_decimate > 1 && td->refine_edges) {
+            if (td->refine_edges) {
+                refine_edges(td, &im, quad_original);
+            }
+
+            // make sure the homographies are computed...
+            if (quad_update_homographies(quad_original))
+                continue;
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////
+    // Reconcile detections--- don't report the same tag more
+    // than once. (Allow non-overlapping duplicate detections.)
+    if (1) {
+        zarray_t *poly0 = g2d_polygon_create_zeros(4);
+        zarray_t *poly1 = g2d_polygon_create_zeros(4);
+
+        for (int i0 = 0; i0 < zarray_size(detections); i0++) {
+
+            struct quad *det0;
+            zarray_get_volatile(detections, i0, &det0);
+
+            for (int k = 0; k < 4; k++)
+                zarray_set(poly0, k, det0->p[k], NULL);
+
+            for (int i1 = i0+1; i1 < zarray_size(detections); i1++) {
+
+                struct quad *det1;
+                zarray_get_volatile(detections, i1, &det1);
+
+                for (int k = 0; k < 4; k++)
+                    zarray_set(poly1, k, det1->p[k], NULL);
+
+                if (g2d_polygon_overlaps_polygon(poly0, poly1)) {
+                    // the tags overlap. Delete one, keep the other.
+
+                    int pref = 0; // 0 means undecided which one we'll keep.
+
+                    // if we STILL don't prefer one detection over the other, then pick
+                    // any deterministic criterion.
+                    for (int i = 0; i < 4; i++) {
+                        pref = prefer_smaller(pref, det0->p[i][0], det1->p[i][0]);
+                        pref = prefer_smaller(pref, det0->p[i][1], det1->p[i][1]);
+                    }
+
+                    if (pref == 0) {
+                        // at this point, we should only be undecided if the tag detections
+                        // are *exactly* the same. How would that happen?
+                        printf("uh oh, no preference for overlappingdetection\n");
+                    }
+
+                    if (pref < 0) {
+                        // keep det0, destroy det1
+                        matd_destroy(det1->H);
+                        matd_destroy(det1->Hinv);
+                        zarray_remove_index(detections, i1, 1);
+                        i1--; // retry the same index
+                        goto retry1;
+                    } else {
+                        // keep det1, destroy det0
+                        matd_destroy(det0->H);
+                        matd_destroy(det0->Hinv);
+                        zarray_remove_index(detections, i0, 1);
+                        i0--; // retry the same index.
+                        goto retry0;
+                    }
+                }
+
+              retry1: ;
+            }
+
+          retry0: ;
+        }
+
+        zarray_destroy(poly0);
+        zarray_destroy(poly1);
+    }
+
+    list_init(out, sizeof(find_rects_list_lnk_data_t));
+
+    const int r_diag_len = fast_roundf(fast_sqrtf((roi->w * roi->w) + (roi->h * roi->h))) * 2;
+    int *theta_buffer = fb_alloc(sizeof(int) * r_diag_len);
+    uint32_t *mag_buffer = fb_alloc(sizeof(uint32_t) * r_diag_len);
+    point_t *point_buffer = fb_alloc(sizeof(point_t) * r_diag_len);
+
+    for (int i = 0, j = zarray_size(detections); i < j; i++) {
+        struct quad *det;
+        zarray_get_volatile(detections, i, &det);
+
+        line_t lines[4];
+        lines[0].x1 = fast_roundf(det->p[0][0]) + roi->x; lines[0].y1 = fast_roundf(det->p[0][1]) + roi->y;
+        lines[0].x2 = fast_roundf(det->p[1][0]) + roi->x; lines[0].y2 = fast_roundf(det->p[1][1]) + roi->y;
+        lines[1].x1 = fast_roundf(det->p[1][0]) + roi->x; lines[1].y1 = fast_roundf(det->p[1][1]) + roi->y;
+        lines[1].x2 = fast_roundf(det->p[2][0]) + roi->x; lines[1].y2 = fast_roundf(det->p[2][1]) + roi->y;
+        lines[2].x1 = fast_roundf(det->p[2][0]) + roi->x; lines[2].y1 = fast_roundf(det->p[2][1]) + roi->y;
+        lines[2].x2 = fast_roundf(det->p[3][0]) + roi->x; lines[2].y2 = fast_roundf(det->p[3][1]) + roi->y;
+        lines[3].x1 = fast_roundf(det->p[3][0]) + roi->x; lines[3].y1 = fast_roundf(det->p[3][1]) + roi->y;
+        lines[3].x2 = fast_roundf(det->p[0][0]) + roi->x; lines[3].y2 = fast_roundf(det->p[0][1]) + roi->y;
+
+        uint32_t magnitude = 0;
+
+        for (int i = 0; i < 4; i++) {
+            if(!lb_clip_line(&lines[i], 0, 0, ptr->w, ptr->h)) {
+                continue;
+            }
+
+            size_t index = trace_line(ptr, &lines[i], theta_buffer, mag_buffer, point_buffer);
+
+            for (int j = 0; j < index; j++) {
+                magnitude += mag_buffer[j];
+            }
+        }
+
+        if (magnitude < threshold) {
+            continue;
+        }
+
+        find_rects_list_lnk_data_t lnk_data;
+        rectangle_init(&(lnk_data.rect), fast_roundf(det->p[0][0]) + roi->x, fast_roundf(det->p[0][1]) + roi->y, 0, 0);
+
+        for (size_t k = 1, l = (sizeof(det->p) / sizeof(det->p[0])); k < l; k++) {
+            rectangle_t temp;
+            rectangle_init(&temp, fast_roundf(det->p[k][0]) + roi->x, fast_roundf(det->p[k][1]) + roi->y, 0, 0);
+            rectangle_united(&(lnk_data.rect), &temp);
+        }
+
+        // Add corners...
+        lnk_data.corners[0].x = fast_roundf(det->p[3][0]) + roi->x; // top-left
+        lnk_data.corners[0].y = fast_roundf(det->p[3][1]) + roi->y; // top-left
+        lnk_data.corners[1].x = fast_roundf(det->p[2][0]) + roi->x; // top-right
+        lnk_data.corners[1].y = fast_roundf(det->p[2][1]) + roi->y; // top-right
+        lnk_data.corners[2].x = fast_roundf(det->p[1][0]) + roi->x; // bottom-right
+        lnk_data.corners[2].y = fast_roundf(det->p[1][1]) + roi->y; // bottom-right
+        lnk_data.corners[3].x = fast_roundf(det->p[0][0]) + roi->x; // bottom-left
+        lnk_data.corners[3].y = fast_roundf(det->p[0][1]) + roi->y; // bottom-left
+
+        lnk_data.magnitude = magnitude;
+
+        list_push_back(out, &lnk_data);
+    }
+
+    fb_free(); // point_buffer
+    fb_free(); // mag_buffer
+    fb_free(); // theta_buffer
+
+    zarray_destroy(detections);
+    fb_free(); // grayscale_image;
+    apriltag_detector_destroy(td);
+    fb_free(); // umm_init_x();
+}
+#endif //IMLIB_ENABLE_FIND_RECTS
+
+#ifdef IMLIB_ENABLE_ROTATION_CORR
+// http://jepsonsblog.blogspot.com/2012/11/rotation-in-3d-using-opencvs.html
+void imlib_rotation_corr(image_t *img, float x_rotation, float y_rotation, float z_rotation,
+                         float x_translation, float y_translation,
+                         float zoom)
+{
+    umm_init_x(4000); // 200 20 byte heap blocks...
+
+    float fov = (M_PI_2 * 2) / 3; // 60 deg FOV
+    float fov_2 = fov / 2.0;
+    float d = fast_sqrtf((img->w * img->w) + (img->h * img->h));
+    float h = d / (2.0 * tanf(fov_2));
+    float h_z = h * zoom;
+
+    matd_t *A1 = matd_create(4, 3);
+    MATD_EL(A1, 0, 0) = 1;  MATD_EL(A1, 0, 1) = 0;  MATD_EL(A1, 0, 2) = -img->w / 2.0;
+    MATD_EL(A1, 1, 0) = 0;  MATD_EL(A1, 1, 1) = 1;  MATD_EL(A1, 1, 2) = -img->h / 2.0;
+    MATD_EL(A1, 2, 0) = 0;  MATD_EL(A1, 2, 1) = 0;  MATD_EL(A1, 2, 2) = 0;
+    MATD_EL(A1, 3, 0) = 0;  MATD_EL(A1, 3, 1) = 0;  MATD_EL(A1, 3, 2) = 1; // needed for h translation
+
+    matd_t *RX = matd_create(4, 4);
+    MATD_EL(RX, 0, 0) = 1;  MATD_EL(RX, 0, 1) = 0;                  MATD_EL(RX, 0, 2) = 0;                  MATD_EL(RX, 0, 3) = 0;
+    MATD_EL(RX, 1, 0) = 0;  MATD_EL(RX, 1, 1) = +cosf(x_rotation);  MATD_EL(RX, 1, 2) = -sinf(x_rotation);  MATD_EL(RX, 1, 3) = 0;
+    MATD_EL(RX, 2, 0) = 0;  MATD_EL(RX, 2, 1) = +sinf(x_rotation);  MATD_EL(RX, 2, 2) = +cosf(x_rotation);  MATD_EL(RX, 2, 3) = 0;
+    MATD_EL(RX, 3, 0) = 0;  MATD_EL(RX, 3, 1) = 0;                  MATD_EL(RX, 3, 2) = 0;                  MATD_EL(RX, 3, 3) = 1;
+
+    matd_t *RY = matd_create(4, 4);
+    MATD_EL(RY, 0, 0) = +cosf(y_rotation);  MATD_EL(RY, 0, 1) = 0;  MATD_EL(RY, 0, 2) = -sinf(y_rotation);  MATD_EL(RY, 0, 3) = 0;
+    MATD_EL(RY, 1, 0) = 0;                  MATD_EL(RY, 1, 1) = 1;  MATD_EL(RY, 1, 2) = 0;                  MATD_EL(RY, 1, 3) = 0;
+    MATD_EL(RY, 2, 0) = +sinf(y_rotation);  MATD_EL(RY, 2, 1) = 0;  MATD_EL(RY, 2, 2) = +cosf(y_rotation);  MATD_EL(RY, 2, 3) = 0;
+    MATD_EL(RY, 3, 0) = 0;                  MATD_EL(RY, 3, 1) = 0;  MATD_EL(RY, 3, 2) = 0;                  MATD_EL(RY, 3, 3) = 1;
+
+    matd_t *RZ = matd_create(4, 4);
+    MATD_EL(RZ, 0, 0) = +cosf(z_rotation);  MATD_EL(RZ, 0, 1) = -sinf(z_rotation);  MATD_EL(RZ, 0, 2) = 0;  MATD_EL(RZ, 0, 3) = 0;
+    MATD_EL(RZ, 1, 0) = +sinf(z_rotation);  MATD_EL(RZ, 1, 1) = +cosf(z_rotation);  MATD_EL(RZ, 1, 2) = 0;  MATD_EL(RZ, 1, 3) = 0;
+    MATD_EL(RZ, 2, 0) = 0;                  MATD_EL(RZ, 2, 1) = 0;                  MATD_EL(RZ, 2, 2) = 1;  MATD_EL(RZ, 2, 3) = 0;
+    MATD_EL(RZ, 3, 0) = 0;                  MATD_EL(RZ, 3, 1) = 0;                  MATD_EL(RZ, 3, 2) = 0;  MATD_EL(RZ, 3, 3) = 1;
+
+    matd_t *R = matd_op("M*M*M", RX, RY, RZ);
+
+    matd_t *T = matd_create(4, 4);
+    MATD_EL(T, 0, 0) = 1;   MATD_EL(T, 0, 1) = 0;   MATD_EL(T, 0, 2) = 0;   MATD_EL(T, 0, 3) = x_translation;
+    MATD_EL(T, 1, 0) = 0;   MATD_EL(T, 1, 1) = 1;   MATD_EL(T, 1, 2) = 0;   MATD_EL(T, 1, 3) = y_translation;
+    MATD_EL(T, 2, 0) = 0;   MATD_EL(T, 2, 1) = 0;   MATD_EL(T, 2, 2) = 1;   MATD_EL(T, 2, 3) = h;
+    MATD_EL(T, 3, 0) = 0;   MATD_EL(T, 3, 1) = 0;   MATD_EL(T, 3, 2) = 0;   MATD_EL(T, 3, 3) = 1;
+
+    matd_t *A2 = matd_create(3, 4);
+    MATD_EL(A2, 0, 0) = h_z;    MATD_EL(A2, 0, 1) = 0;      MATD_EL(A2, 0, 2) = img->w / 2.0;   MATD_EL(A2, 0, 3) = 0;
+    MATD_EL(A2, 1, 0) = 0;      MATD_EL(A2, 1, 1) = h_z;    MATD_EL(A2, 1, 2) = img->h / 2.0;   MATD_EL(A2, 1, 3) = 0;
+    MATD_EL(A2, 2, 0) = 0;      MATD_EL(A2, 2, 1) = 0;      MATD_EL(A2, 2, 2) = 1;              MATD_EL(A2, 2, 3) = 0;
+
+    matd_t *T1 = matd_op("M*M", R, A1);
+    matd_t *T2 = matd_op("M*M", T, T1);
+    matd_t *T3 = matd_op("M*M", A2, T2);
+    matd_t *T4 = matd_inverse(T3);
+
+    switch(img->bpp) {
+        case IMAGE_BPP_BINARY: {
+            // Create a temp copy of the image to pull pixels from.
+            uint32_t *tmp = fb_alloc(((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * img->h);
+            memcpy(tmp, img->data, ((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * img->h);
+            memset(img->data, 0, ((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * img->h);
+
+            if (T4) for (int y = 0, yy = img->h; y < yy; y++) {
+                uint32_t *row_ptr = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(img, y);
+                for (int x = 0, xx = img->w; x < xx; x++) {
+                    float sourceX, sourceY; homography_project(T4, x, y, &sourceX, &sourceY);
+                    int sourceX2 = round(sourceX);
+                    int sourceY2 = round(sourceY);
+
+                    if ((0 <= sourceX) && (sourceX < img->w) && (0 <= sourceY) && (sourceY < img->h)) {
+                        uint32_t *ptr = tmp + (((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * sourceY2);
+                        int pixel = IMAGE_GET_BINARY_PIXEL_FAST(ptr, sourceX2);
+                        IMAGE_PUT_BINARY_PIXEL_FAST(row_ptr, x, pixel);
+                    }
+                }
+            }
+
+            fb_free();
+            break;
+        }
+        case IMAGE_BPP_GRAYSCALE: {
+            // Create a temp copy of the image to pull pixels from.
+            uint8_t *tmp = fb_alloc(img->w * img->h * sizeof(uint8_t));
+            memcpy(tmp, img->data, img->w * img->h * sizeof(uint8_t));
+            memset(img->data, 0, img->w * img->h * sizeof(uint8_t));
+
+            if (T4) for (int y = 0, yy = img->h; y < yy; y++) {
+                uint8_t *row_ptr = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(img, y);
+                for (int x = 0, xx = img->w; x < xx; x++) {
+                    float sourceX, sourceY; homography_project(T4, x, y, &sourceX, &sourceY);
+                    int sourceX2 = round(sourceX);
+                    int sourceY2 = round(sourceY);
+
+                    if ((0 <= sourceX) && (sourceX < img->w) && (0 <= sourceY) && (sourceY < img->h)) {
+                        uint8_t *ptr = tmp + (img->w * sourceY2);
+                        int pixel = IMAGE_GET_GRAYSCALE_PIXEL_FAST(ptr, sourceX2);
+                        IMAGE_PUT_GRAYSCALE_PIXEL_FAST(row_ptr, x, pixel);
+                    }
+                }
+            }
+
+            fb_free();
+            break;
+        }
+        case IMAGE_BPP_RGB565: {
+            // Create a temp copy of the image to pull pixels from.
+            uint16_t *tmp = fb_alloc(img->w * img->h * sizeof(uint16_t));
+            memcpy(tmp, img->data, img->w * img->h * sizeof(uint16_t));
+            memset(img->data, 0, img->w * img->h * sizeof(uint16_t));
+
+            if (T4) for (int y = 0, yy = img->h; y < yy; y++) {
+                uint16_t *row_ptr = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(img, y);
+                for (int x = 0, xx = img->w; x < xx; x++) {
+                    float sourceX, sourceY; homography_project(T4, x, y, &sourceX, &sourceY);
+                    int sourceX2 = round(sourceX);
+                    int sourceY2 = round(sourceY);
+
+                    if ((0 <= sourceX) && (sourceX < img->w) && (0 <= sourceY) && (sourceY < img->h)) {
+                        uint16_t *ptr = tmp + (img->w * sourceY2);
+                        int pixel = IMAGE_GET_RGB565_PIXEL_FAST(ptr, sourceX2);
+                        IMAGE_PUT_RGB565_PIXEL_FAST(row_ptr, x, pixel);
+                    }
+                }
+            }
+
+            fb_free();
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+
+    if (T4) matd_destroy(T4);
+    matd_destroy(T3);
+    matd_destroy(T2);
+    matd_destroy(T1);
+    matd_destroy(A2);
+    matd_destroy(T);
+    matd_destroy(R);
+    matd_destroy(RZ);
+    matd_destroy(RY);
+    matd_destroy(RX);
+    matd_destroy(A1);
+
+    fb_free(); // umm_init_x();
+}
+#endif //IMLIB_ENABLE_ROTATION_CORR
 #pragma GCC diagnostic pop
+#endif //IMLIB_ENABLE_APRILTAGS

@@ -11,18 +11,14 @@
 #include <stdint.h>
 #include "imlib.h"
 
-#define OV9650_PID     (0x96)
-#define OV2640_PID     (0x26)
-#define OV7725_PID     (0x77)
-
-typedef struct {
-    uint8_t MIDH;
-    uint8_t MIDL;
-    uint8_t PID;
-    uint8_t VER;
-} sensor_id_t;
+#define OV9650_ID       (0x96)
+#define OV2640_ID       (0x26)
+#define OV7725_ID       (0x77)
+#define MT9V034_ID      (0x13)
+#define LEPTON_ID       (0x54)
 
 typedef enum {
+    PIXFORMAT_INVLAID = 0,
     PIXFORMAT_BAYER,     // 1BPP/RAW
     PIXFORMAT_RGB565,    // 2BPP/RGB565
     PIXFORMAT_YUV422,    // 2BPP/YUV422
@@ -31,17 +27,31 @@ typedef enum {
 } pixformat_t;
 
 typedef enum {
-    FRAMESIZE_40x30,    // 40x30
-    FRAMESIZE_64x32,    // 64x32
-    FRAMESIZE_64x64,    // 64x64
+    FRAMESIZE_INVALID = 0,
+    // C/SIF Resolutions
     FRAMESIZE_QQCIF,    // 88x72
-    FRAMESIZE_QQVGA,    // 160x120
-    FRAMESIZE_QQVGA2,   // 128x160
     FRAMESIZE_QCIF,     // 176x144
-    FRAMESIZE_HQVGA,    // 220x160
-    FRAMESIZE_QVGA,     // 320x240
     FRAMESIZE_CIF,      // 352x288
+    FRAMESIZE_QQSIF,    // 88x60
+    FRAMESIZE_QSIF,     // 176x120
+    FRAMESIZE_SIF,      // 352x240
+    // VGA Resolutions
+    FRAMESIZE_QQQQVGA,  // 40x30
+    FRAMESIZE_QQQVGA,   // 80x60
+    FRAMESIZE_QQVGA,    // 160x120
+    FRAMESIZE_QVGA,     // 320x240
     FRAMESIZE_VGA,      // 640x480
+    FRAMESIZE_HQQQVGA,  // 60x40
+    FRAMESIZE_HQQVGA,   // 120x80
+    FRAMESIZE_HQVGA,    // 240x160
+    // FFT Resolutions
+    FRAMESIZE_64X32,    // 64x32
+    FRAMESIZE_64X64,    // 64x64
+    FRAMESIZE_128X64,   // 128x64
+    FRAMESIZE_128X128,  // 128x128
+    // Other
+    FRAMESIZE_LCD,      // 128x160
+    FRAMESIZE_QQVGA2,   // 128x160
     FRAMESIZE_SVGA,     // 800x600
     FRAMESIZE_SXGA,     // 1280x1024
     FRAMESIZE_UXGA,     // 1600x1200
@@ -80,9 +90,7 @@ typedef enum {
 typedef enum {
     ACTIVE_LOW,
     ACTIVE_HIGH
-} reset_polarity_t;
-
-typedef void (*line_filter_t) (uint8_t *src, int src_stride, uint8_t *dst, int dst_stride, void *args);
+} polarity_t;
 
 #define SENSOR_HW_FLAGS_VSYNC        (0) // vertical sync polarity.
 #define SENSOR_HW_FLAGS_HSYNC        (1) // horizontal sync polarity.
@@ -95,15 +103,16 @@ typedef void (*line_filter_t) (uint8_t *src, int src_stride, uint8_t *dst, int d
 
 typedef struct _sensor sensor_t;
 typedef struct _sensor {
-    sensor_id_t id;             // Sensor ID.
+    uint8_t  chip_id;           // Sensor ID.
     uint8_t  slv_addr;          // Sensor I2C slave address.
+    uint16_t gs_bpp;            // Grayscale bytes per pixel.
     uint32_t hw_flags;          // Hardware flags (clock polarities/hw capabilities)
 
-    // Line pre-processing function and args
-    void *line_filter_args;
-    line_filter_t line_filter_func;
+    uint32_t vsync_pin;         // VSYNC GPIO output pin.
+    GPIO_TypeDef *vsync_gpio;   // VSYNC GPIO output port.
 
-    reset_polarity_t reset_pol; // Reset polarity (TODO move to hw_flags)
+    polarity_t pwdn_pol; // PWDN polarity (TODO move to hw_flags)
+    polarity_t reset_pol; // Reset polarity (TODO move to hw_flags)
 
     // Sensor state
     sde_t sde;                  // Special digital effects
@@ -114,6 +123,9 @@ typedef struct _sensor {
 
     // Sensor function pointers
     int  (*reset)               (sensor_t *sensor);
+    int  (*sleep)               (sensor_t *sensor, int enable);
+    int  (*read_reg)            (sensor_t *sensor, uint8_t reg_addr);
+    int  (*write_reg)           (sensor_t *sensor, uint8_t reg_addr, uint16_t reg_data);
     int  (*set_pixformat)       (sensor_t *sensor, pixformat_t pixformat);
     int  (*set_framesize)       (sensor_t *sensor, framesize_t framesize);
     int  (*set_framerate)       (sensor_t *sensor, framerate_t framerate);
@@ -123,13 +135,17 @@ typedef struct _sensor {
     int  (*set_gainceiling)     (sensor_t *sensor, gainceiling_t gainceiling);
     int  (*set_quality)         (sensor_t *sensor, int quality);
     int  (*set_colorbar)        (sensor_t *sensor, int enable);
-    int  (*set_auto_gain)       (sensor_t *sensor, int enable, int gain);
-    int  (*set_auto_exposure)   (sensor_t *sensor, int enable, int exposure);
-    int  (*set_auto_whitebal)   (sensor_t *sensor, int enable, int r_gain, int g_gain, int b_gain);
+    int  (*set_auto_gain)       (sensor_t *sensor, int enable, float gain_db, float gain_db_ceiling);
+    int  (*get_gain_db)         (sensor_t *sensor, float *gain_db);
+    int  (*set_auto_exposure)   (sensor_t *sensor, int enable, int exposure_us);
+    int  (*get_exposure_us)     (sensor_t *sensor, int *exposure_us);
+    int  (*set_auto_whitebal)   (sensor_t *sensor, int enable, float r_gain_db, float g_gain_db, float b_gain_db);
+    int  (*get_rgb_gain_db)     (sensor_t *sensor, float *r_gain_db, float *g_gain_db, float *b_gain_db);
     int  (*set_hmirror)         (sensor_t *sensor, int enable);
     int  (*set_vflip)           (sensor_t *sensor, int enable);
     int  (*set_special_effect)  (sensor_t *sensor, sde_t sde);
     int  (*set_lens_correction) (sensor_t *sensor, int enable, int radi, int coef);
+    int  (*snapshot)            (sensor_t *sensor, image_t *image);
 } sensor_t;
 
 // Resolution table
@@ -147,11 +163,14 @@ int sensor_reset();
 // Return sensor PID.
 int sensor_get_id();
 
+// Sleep mode.
+int sensor_sleep(int enable);
+
 // Read a sensor register.
-int sensor_read_reg(uint8_t reg);
+int sensor_read_reg(uint8_t reg_addr);
 
 // Write a sensor register.
-int sensor_write_reg(uint8_t reg, uint8_t val);
+int sensor_write_reg(uint8_t reg_addr, uint16_t reg_data);
 
 // Set the sensor pixel format.
 int sensor_set_pixformat(pixformat_t pixformat);
@@ -185,13 +204,22 @@ int sensor_set_quality(int qs);
 int sensor_set_colorbar(int enable);
 
 // Enable auto gain or set value manually.
-int sensor_set_auto_gain(int enable, int gain);
+int sensor_set_auto_gain(int enable, float gain_db, float gain_db_ceiling);
+
+// Get the gain value.
+int sensor_get_gain_db(float *gain_db);
 
 // Enable auto exposure or set value manually.
-int sensor_set_auto_exposure(int enable, int exposure);
+int sensor_set_auto_exposure(int enable, int exposure_us);
+
+// Get the exposure value.
+int sensor_get_exposure_us(int *get_exposure_us);
 
 // Enable auto white balance or set value manually.
-int sensor_set_auto_whitebal(int enable, int r_gain, int g_gain, int b_gain);
+int sensor_set_auto_whitebal(int enable, float r_gain_db, float g_gain_db, float b_gain_db);
+
+// Get the rgb gain values.
+int sensor_get_rgb_gain_db(float *r_gain_db, float *g_gain_db, float *b_gain_db);
 
 // Enable/disable the hmirror mode.
 int sensor_set_hmirror(int enable);
@@ -205,9 +233,9 @@ int sensor_set_special_effect(sde_t sde);
 // Set lens shading correction
 int sensor_set_lens_correction(int enable, int radi, int coef);
 
-// Set filter function.
-int sensor_set_line_filter(line_filter_t line_filter_func, void *line_filter_args);
+// Set vsync output pin
+int sensor_set_vsync_output(GPIO_TypeDef *gpio, uint32_t pin);
 
-// Capture a Snapshot.
-int sensor_snapshot(image_t *image, line_filter_t line_filter_func, void *line_filter_args);
+// Default snapshot function.
+int sensor_snapshot(sensor_t *sensor, image_t *image);
 #endif /* __SENSOR_H__ */

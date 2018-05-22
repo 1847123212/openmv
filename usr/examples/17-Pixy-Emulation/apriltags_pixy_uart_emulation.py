@@ -44,7 +44,7 @@ import image, math, pyb, sensor, struct, time
 sensor.reset()
 sensor.set_pixformat(sensor.GRAYSCALE)
 sensor.set_framesize(sensor.QQVGA)
-sensor.skip_frames(60)
+sensor.skip_frames(time = 2000)
 
 # LED Setup
 
@@ -93,10 +93,10 @@ def write(data):
     uart.write(data)
 
 def available():
-    return 0 # Not implemented as there is no way for the us to be ready to receive the data.
+    return uart.any()
 
 def read_byte():
-    return 0 # Not implemented as there is no way for the us to be ready to receive the data.
+    return uart.readchar()
 
 # Helper Stuff
 

@@ -36,18 +36,44 @@ void SystemClock_Config(void);
 
 void HAL_MspInit(void)
 {
-    #if defined(STM32F765xx) || defined(STM32F769xx)
-    // Invalidate each cache before enabling it
+    /* Set the system clock */
+    SystemClock_Config();
+
+    #if defined(OMV_DMA_REGION_BASE)
+    __DSB(); __ISB();
+    HAL_MPU_Disable();
+
+    /* Configure the MPU attributes to disable caching DMA buffers */
+    MPU_Region_InitTypeDef MPU_InitStruct;
+    MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+    MPU_InitStruct.BaseAddress      = OMV_DMA_REGION_BASE;
+    MPU_InitStruct.Size             = OMV_DMA_REGION_SIZE;
+    MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+    MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+    MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
+    MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+    MPU_InitStruct.Number           = MPU_REGION_NUMBER0;
+    MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL1;
+    MPU_InitStruct.SubRegionDisable = 0x00;
+    MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
+    HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+    /* Enable the MPU */
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+    __DSB(); __ISB();
+    #endif
+
+    /* Enable I/D cache */
+    #if defined(MCU_SERIES_F7) ||\
+        defined(MCU_SERIES_H7)
+    // Invalidate CPU cache
     SCB_InvalidateICache();
     SCB_InvalidateDCache();
 
-    /* Enable the CPU Cache */
+    // Enable the CPU Cache
     SCB_EnableICache();
     SCB_EnableDCache();
     #endif
-
-    /* Set the system clock */
-    SystemClock_Config();
 
     /* Config Systick */
     HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);
@@ -59,7 +85,7 @@ void HAL_MspInit(void)
     __GPIOD_CLK_ENABLE();
     __GPIOE_CLK_ENABLE();
 
-#if defined(STM32F769xx)
+    #if defined(STM32F769xx)
     __GPIOF_CLK_ENABLE();
     __GPIOG_CLK_ENABLE();
     __GPIOH_CLK_ENABLE();
@@ -69,11 +95,21 @@ void HAL_MspInit(void)
 
     /* Enable JPEG clock */
     __HAL_RCC_JPEG_CLK_ENABLE();
-#endif
+    #endif
 
     /* Enable DMA clocks */
     __DMA1_CLK_ENABLE();
     __DMA2_CLK_ENABLE();
+
+    #if defined(MCU_SERIES_H7)
+    // MDMA clock
+    __HAL_RCC_MDMA_CLK_ENABLE();
+    #endif
+
+    #if defined(OMV_HARDWARE_JPEG)
+    // Enable JPEG clock
+    __HAL_RCC_JPGDECEN_CLK_ENABLE();
+    #endif
 
     /* Configure DCMI GPIO */
     GPIO_InitTypeDef  GPIO_InitStructure;
@@ -130,7 +166,7 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim)
         GPIO_InitTypeDef  GPIO_InitStructure;
         GPIO_InitStructure.Pin       = DCMI_TIM_PIN;
         GPIO_InitStructure.Pull      = GPIO_NOPULL;
-        GPIO_InitStructure.Speed     = GPIO_SPEED_LOW;
+        GPIO_InitStructure.Speed     = GPIO_SPEED_HIGH;
         GPIO_InitStructure.Mode      = GPIO_MODE_AF_PP;
         GPIO_InitStructure.Alternate = DCMI_TIM_AF;
         HAL_GPIO_Init(DCMI_TIM_PORT, &GPIO_InitStructure);
@@ -146,10 +182,16 @@ void HAL_DCMI_MspInit(DCMI_HandleTypeDef* hdcmi)
     /* DCMI GPIOs configuration */
     GPIO_InitTypeDef  GPIO_InitStructure;
     GPIO_InitStructure.Pull      = GPIO_PULLDOWN;
-    GPIO_InitStructure.Speed     = GPIO_SPEED_LOW;
-    GPIO_InitStructure.Mode      = GPIO_MODE_AF_PP;
+    GPIO_InitStructure.Speed     = GPIO_SPEED_HIGH;
     GPIO_InitStructure.Alternate = GPIO_AF13_DCMI;
 
+    /* Enable VSYNC EXTI */
+    GPIO_InitStructure.Mode = GPIO_MODE_IT_RISING_FALLING;
+    GPIO_InitStructure.Pin  = DCMI_VSYNC_PIN;
+    HAL_GPIO_Init(DCMI_VSYNC_PORT, &GPIO_InitStructure);
+
+    /* Configure DCMI pins */
+    GPIO_InitStructure.Mode      = GPIO_MODE_AF_PP;
     for (int i=0; i<NUM_DCMI_PINS; i++) {
         GPIO_InitStructure.Pin = dcmi_pins[i].pin;
         HAL_GPIO_Init(dcmi_pins[i].port, &GPIO_InitStructure);

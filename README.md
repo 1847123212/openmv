@@ -1,24 +1,13 @@
-###OpenMV (Open Machine Vision Module)
-
-OpenMV is an open-source tiny machine vision module based on the STM32F4xx ARM Cortex-M4 MCU and the OV2640 JPEG sensor.
-
-OpenMV is programmable in Python3 (MicroPython) and capable of doing face detection and tracking, keypoint extraction, color tracking and more..The board has USB, a uSD connector and an expansion header (USART/SPI/I2C).
-
-A Python IDE with syntax highlighting is available for the camera, it can run/upload scripts to the camera, view the framebuffer and update the firmware.
+### OpenMV (Open-Source Machine Vision)
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/iabdalkader/openmv/master/imgs/openmv1.jpeg" width="240" height="180" border="10">
+<img src="https://raw.githubusercontent.com/openmv/openmv-media/master/boards/openmv-cam/v3/web-new-cam-v3-angle.jpg" width="320" height="320" border="10">
 </p>
-**This is a video of the color tracking:**
-<p align="center">
-<a href="http://www.youtube.com/watch?feature=player_embedded&v=T-oMfnEsa1o
-" target="_blank"><img src="http://img.youtube.com/vi/T-oMfnEsa1o/0.jpg" 
-alt="" width="240" height="180" border="10" />
-</p>
-**This is a video of the face detection:**
-<p align="center">
-<a href="http://www.youtube.com/watch?feature=player_embedded&v=SdQF5JI4kzU
-" target="_blank"><img src="http://img.youtube.com/vi/SdQF5JI4kzU/0.jpg" 
-alt="" width="240" height="180" border="10" />
-</p>
-For more information, please visit my [blog](http://sigalrm.blogspot.com/search/label/OpenMV)
+
+The OpenMV project aims at making machine vision more accessible to beginners by developing a user-friendly, open-source, low-cost machine vision platform. 
+
+OpenMV cameras are programmable in Python3 and come with an extensive set of image processing functions such as face detection, keypoints descriptors, color tracking, QR and Bar codes decoding, AprilTags, GIF and MJPEG recording and more. Additionally, OpenMV includes a cross-platform IDE (based on Qt Creator) designed specifically to support programmable cameras. The IDE allows viewing the camera's frame buffer, accessing sensor controls, uploading scripts to the camera via serial over USB (or WiFi/BLE if available) and includes a set of image processing tools to generate tags, thresholds, keypoints etc...
+
+The first generation of OpenMV cameras is based on STM32F ARM Cortex-M Digital Signal Controllers (DSCs) and Omnivision sensors. The board has built-in RGB and IR LEDs, USB FS for programming and video streaming, uSD socket and I/O headers breaking out PWM, UARTs, SPI and I2C. Additionally, OpenMV supports extension modules (shields) using the I/O headers such as WiFi, BLE, Thermal (FIR) and LCD shields.
+
+The OpenMV project was successfully funded via Kickstarter back in 2015 and has come a long way since then. For more information, please visit [https://openmv.io](https://openmv.io)

@@ -1,19 +1,13 @@
-# Sharpen Filter Example:
+# Sharpen Filter Example
 #
-# This example demonstrates using morph to sharpen images.
+# This example shows off using the laplacian filter to sharpen images.
 
 import sensor, image, time
-
-kernel_size = 1 # kernel width = (size*2)+1, kernel height = (size*2)+1
-kernel = [-1, -1, -1,\
-          -1, +9, -1,\
-          -1, -1, -1]
-# This is a sharpen filter kernel.
 
 sensor.reset() # Initialize the camera sensor.
 sensor.set_pixformat(sensor.GRAYSCALE) # or sensor.RGB565
 sensor.set_framesize(sensor.QQVGA) # or sensor.QVGA (or others)
-sensor.skip_frames(10) # Let new settings take affect.
+sensor.skip_frames(time = 2000) # Let new settings take affect.
 clock = time.clock() # Tracks FPS.
 
 while(True):
@@ -21,7 +15,7 @@ while(True):
     img = sensor.snapshot() # Take a picture and return the image.
 
     # Run the kernel on every pixel of the image.
-    img.morph(kernel_size, kernel)
+    img.laplacian(1, sharpen=True)
 
     print(clock.fps()) # Note: Your OpenMV Cam runs about half as fast while
     # connected to your computer. The FPS should increase once disconnected.

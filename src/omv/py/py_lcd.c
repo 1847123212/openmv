@@ -151,7 +151,7 @@ static mp_obj_t py_lcd_deinit()
 static mp_obj_t py_lcd_init(uint n_args, const mp_obj_t *args, mp_map_t *kw_args)
 {
     py_lcd_deinit();
-    switch (py_helper_lookup_int(kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_type), LCD_SHIELD)) {
+    switch (py_helper_keyword_int(n_args, args, 0, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_type), LCD_SHIELD)) {
         case LCD_NONE:
             return mp_const_none;
         case LCD_SHIELD:
@@ -276,13 +276,10 @@ static mp_obj_t py_lcd_get_backlight()
 static mp_obj_t py_lcd_display(uint n_args, const mp_obj_t *args, mp_map_t *kw_args)
 {
     image_t *arg_img = py_image_cobj(args[0]);
-    PY_ASSERT_FALSE_MSG(IM_IS_JPEG(arg_img),
-            "Operation not supported on JPEG");
+    PY_ASSERT_TRUE_MSG(IM_IS_MUTABLE(arg_img), "Image format is not supported.");
 
-    rectangle_t arg_r;
-    py_helper_lookup_rectangle(kw_args, arg_img, &arg_r);
     rectangle_t rect;
-    if (!rectangle_subimg(arg_img, &arg_r, &rect)) ff_no_intersection(NULL);
+    py_helper_keyword_rectangle_roi(arg_img, n_args, args, 1, kw_args, &rect);
 
     // Fit X.
     int l_pad = 0, r_pad = 0;
@@ -390,7 +387,6 @@ STATIC MP_DEFINE_CONST_DICT(globals_dict, globals_dict_table);
 
 const mp_obj_module_t lcd_module = {
     .base = { &mp_type_module },
-    .name = MP_QSTR_lcd,
     .globals = (mp_obj_t)&globals_dict,
 };
 

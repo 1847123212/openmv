@@ -87,15 +87,16 @@ static float find_block_ncc(image_t *f, image_t *t, i_image_t *sum, int t_mean, 
     if (u < 0) {
         u = 0;
     }
+
     if (v < 0) {
         v = 0;
     }
 
-    if (u+t->w >= f->w) {
+    if (u+w >= f->w) {
         w = f->w - u;
     }
 
-    if (v+t->h >= f->h) {
+    if (v+h >= f->h) {
         h = f->h - v;
     }
 
@@ -127,8 +128,9 @@ float imlib_template_match_ds(image_t *f, image_t *t, rectangle_t *r)
     imlib_integral_image(f, &sum);
 
     // Normalized sum of squares of the template
+    int t_mean = 0;
     uint32_t t_sumsq=0;
-    int t_mean = imlib_image_mean(t);
+    imlib_image_mean(t, &t_mean, &t_mean, &t_mean);
     for (int i=0; i < (t->w*t->h); i++) {
         int c = (int)t->data[i]-t_mean;
         t_sumsq += c*c;
@@ -150,8 +152,7 @@ float imlib_template_match_ds(image_t *f, image_t *t, rectangle_t *r)
     // Step size == template width
     int step = t->w;
 
-    while (step) {
-    //while (true) {
+    while (step > 0) {
         // Set the Diamond Search Pattern (DSP).
         set_dsp(cx, cy, pts, sdsp, step);
 
@@ -160,6 +161,9 @@ float imlib_template_match_ds(image_t *f, image_t *t, rectangle_t *r)
 
         // Find the block with the highest NCC
         for (int i=0; i<num_pts; i++) {
+            if (pts[i].x >= f->w || pts[i].y >= f->h) {
+                continue;
+            }
             float blk_xc = find_block_ncc(f, t, &sum, t_mean, t_sumsq, pts[i].x, pts[i].y);
             if (blk_xc > max_xc) {
                 px = pts[i].x;
@@ -169,17 +173,11 @@ float imlib_template_match_ds(image_t *f, image_t *t, rectangle_t *r)
         }
 
         // If the highest correlation is found at the center block and search is using
-        // SDSP then the highest correlation is found, if not then switch search to SDSP.
+        // LDSP then the highest correlation is found, if not then switch search to SDSP.
         if (px == cx && py == cy) {
-            //if (sdsp == true) {
-            //    break;
-            //}
-            //sdsp = true;
-
             // Note instead of switching to the smaller pattern, the step size can be reduced
             // each time the highest correlation is found at the center, and break on step == 0.
             // This makes DS much more accurate, but slower.
-
             step --;
         }
 
@@ -232,7 +230,9 @@ float imlib_template_match_ex(image_t *f, image_t *t, rectangle_t *roi, int step
     imlib_integral_image_sq(f, &sumsq);
 
     // Normalized sum of squares of the template
-    int t_mean = imlib_image_mean(t);
+    int t_mean = 0;
+    imlib_image_mean(t, &t_mean, &t_mean, &t_mean);
+
     for (int i=0; i < (t->w*t->h); i++) {
         int c = (int)t->data[i]-t_mean;
         den_b += c*c;

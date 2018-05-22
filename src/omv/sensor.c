@@ -10,49 +10,58 @@
 #include <string.h>
 #include "mp.h"
 #include "irq.h"
-#include "sccb.h"
+#include "cambus.h"
 #include "ov9650.h"
 #include "ov2640.h"
 #include "ov7725.h"
+#include "mt9v034.h"
+#include "lepton.h"
 #include "sensor.h"
 #include "systick.h"
 #include "framebuffer.h"
 #include "omv_boardconfig.h"
 
-#define REG_PID        0x0A
-#define REG_VER        0x0B
-
-#define REG_MIDH       0x1C
-#define REG_MIDL       0x1D
-
+#define OV_CHIP_ID      (0x0A)
+#define ON_CHIP_ID      (0x00)
 #define MAX_XFER_SIZE (0xFFFC)
-// If buffer size is bigger than this threshold, the quality is reduced.
-// This is only used for JPEG images sent to the IDE not normal compression.
-#define JPEG_QUALITY_THRESH     (160*120*2)
 
 sensor_t sensor;
 TIM_HandleTypeDef  TIMHandle;
 DMA_HandleTypeDef  DMAHandle;
 DCMI_HandleTypeDef DCMIHandle;
 
-static int line = 0;
+static volatile int line = 0;
 extern uint8_t _line_buf;
 
 const int resolution[][2] = {
-    {40,    30 },    /* 40x30 */
-    {64,    32 },    /* 64x32 */
-    {64,    64 },    /* 64x64 */
-    {88,    72 },    /* QQCIF */
-    {160,   120},    /* QQVGA */
-    {128,   160},    /* QQVGA2*/
-    {176,   144},    /* QCIF  */
-    {240,   160},    /* HQVGA */
-    {320,   240},    /* QVGA  */
-    {352,   288},    /* CIF   */
-    {640,   480},    /* VGA   */
-    {800,   600},    /* SVGA  */
-    {1280,  1024},   /* SXGA  */
-    {1600,  1200},   /* UXGA  */
+    {0,    0   },
+    // C/SIF Resolutions
+    {88,   72  },    /* QQCIF     */
+    {176,  144 },    /* QCIF      */
+    {352,  288 },    /* CIF       */
+    {88,   60  },    /* QQSIF     */
+    {176,  120 },    /* QSIF      */
+    {352,  240 },    /* SIF       */
+    // VGA Resolutions
+    {40,   30  },    /* QQQQVGA   */
+    {80,   60  },    /* QQQVGA    */
+    {160,  120 },    /* QQVGA     */
+    {320,  240 },    /* QVGA      */
+    {640,  480 },    /* VGA       */
+    {60,   40  },    /* HQQQVGA   */
+    {120,  80  },    /* HQQVGA    */
+    {240,  160 },    /* HQVGA     */
+    // FFT Resolutions
+    {64,   32  },    /* 64x32     */
+    {64,   64  },    /* 64x64     */
+    {128,  64  },    /* 128x64    */
+    {128,  128 },    /* 128x64    */
+    // Other
+    {128,  160 },    /* LCD       */
+    {128,  160 },    /* QQVGA2    */
+    {800,  600 },    /* SVGA      */
+    {1280, 1024},    /* SXGA      */
+    {1600, 1200},    /* UXGA      */
 };
 
 #if (OMV_XCLK_SOURCE == OMV_XCLK_TIM)
@@ -111,7 +120,7 @@ static int dcmi_config(uint32_t jpeg_mode)
     DCMIHandle.Init.CaptureRate = DCMI_CR_ALL_FRAME;        // Capture rate all frames
     DCMIHandle.Init.ExtendedDataMode = DCMI_EXTEND_DATA_8B; // Capture 8 bits on every pixel clock
     DCMIHandle.Init.JPEGMode = jpeg_mode;                   // Set JPEG Mode
-    #if defined(STM32F765xx) || defined(STM32F769xx)
+    #if defined(MCU_SERIES_F7) || defined(MCU_SERIES_H7)
     DCMIHandle.Init.ByteSelectMode  = DCMI_BSM_ALL;         // Capture all received bytes
     DCMIHandle.Init.ByteSelectStart = DCMI_OEBS_ODD;        // Ignored
     DCMIHandle.Init.LineSelectMode  = DCMI_LSM_ALL;         // Capture all received lines
@@ -137,19 +146,23 @@ static int dcmi_config(uint32_t jpeg_mode)
 static int dma_config()
 {
     // DMA Stream configuration
-    DMAHandle.Instance              = DMA2_Stream1;             /* Select the DMA instance          */
-    DMAHandle.Init.Channel          = DMA_CHANNEL_1;            /* DMA Channel                      */
-    DMAHandle.Init.Direction        = DMA_PERIPH_TO_MEMORY;     /* Peripheral to memory transfer    */
-    DMAHandle.Init.MemInc           = DMA_MINC_ENABLE;          /* Memory increment mode Enable     */
-    DMAHandle.Init.PeriphInc        = DMA_PINC_DISABLE;         /* Peripheral increment mode Enable */
-    DMAHandle.Init.PeriphDataAlignment  = DMA_PDATAALIGN_WORD;  /* Peripheral data alignment : Word */
-    DMAHandle.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;      /* Memory data alignment : Word     */
-    DMAHandle.Init.Mode             = DMA_NORMAL;               /* Normal DMA mode                  */
-    DMAHandle.Init.Priority         = DMA_PRIORITY_HIGH;        /* Priority level : high            */
-    DMAHandle.Init.FIFOMode         = DMA_FIFOMODE_ENABLE;      /* FIFO mode enabled                */
-    DMAHandle.Init.FIFOThreshold    = DMA_FIFO_THRESHOLD_FULL;  /* FIFO threshold full              */
-    DMAHandle.Init.MemBurst         = DMA_MBURST_INC4;          /* Memory burst                     */
-    DMAHandle.Init.PeriphBurst      = DMA_PBURST_SINGLE;        /* Peripheral burst                 */
+    DMAHandle.Instance                  = DMA2_Stream1;             /* Select the DMA instance          */
+    #if defined(MCU_SERIES_H7)
+    DMAHandle.Init.Request              = DMA_REQUEST_DCMI;         /* DMA Channel                      */
+    #else
+    DMAHandle.Init.Channel              = DMA_CHANNEL_1;            /* DMA Channel                      */
+    #endif
+    DMAHandle.Init.Direction            = DMA_PERIPH_TO_MEMORY;     /* Peripheral to memory transfer    */
+    DMAHandle.Init.MemInc               = DMA_MINC_ENABLE;          /* Memory increment mode Enable     */
+    DMAHandle.Init.PeriphInc            = DMA_PINC_DISABLE;         /* Peripheral increment mode Enable */
+    DMAHandle.Init.PeriphDataAlignment  = DMA_PDATAALIGN_WORD;      /* Peripheral data alignment : Word */
+    DMAHandle.Init.MemDataAlignment     = DMA_MDATAALIGN_WORD;      /* Memory data alignment : Word     */
+    DMAHandle.Init.Mode                 = DMA_NORMAL;               /* Normal DMA mode                  */
+    DMAHandle.Init.Priority             = DMA_PRIORITY_HIGH;        /* Priority level : high            */
+    DMAHandle.Init.FIFOMode             = DMA_FIFOMODE_ENABLE;      /* FIFO mode enabled                */
+    DMAHandle.Init.FIFOThreshold        = DMA_FIFO_THRESHOLD_FULL;  /* FIFO threshold full              */
+    DMAHandle.Init.MemBurst             = DMA_MBURST_INC4;          /* Memory burst                     */
+    DMAHandle.Init.PeriphBurst          = DMA_PBURST_SINGLE;        /* Peripheral burst                 */
 
     // Configure and disable DMA IRQ Channel
     HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, IRQ_PRI_DMA21, IRQ_SUBPRI_DMA21);
@@ -186,6 +199,8 @@ void sensor_init0()
 
 int sensor_init()
 {
+    int init_ret = 0;
+
     /* Do a power cycle */
     DCMI_PWDN_HIGH();
     systick_sleep(10);
@@ -193,8 +208,8 @@ int sensor_init()
     DCMI_PWDN_LOW();
     systick_sleep(10);
 
-    /* Initialize the SCCB interface */
-    SCCB_Init();
+    // Initialize the camera bus.
+    cambus_init();
     systick_sleep(10);
 
     // Configure the sensor external clock (XCLK) to XCLK_FREQ.
@@ -231,9 +246,10 @@ int sensor_init()
     memset(&sensor, 0, sizeof(sensor_t));
 
     /* Some sensors have different reset polarities, and we can't know which sensor
-       is connected before initializing SCCB and probing the sensor, which in turn
+       is connected before initializing cambus and probing the sensor, which in turn
        requires pulling the sensor out of the reset state. So we try to probe the
        sensor with both polarities to determine line state. */
+    sensor.pwdn_pol = ACTIVE_HIGH;
     sensor.reset_pol = ACTIVE_HIGH;
 
     /* Reset the sensor */
@@ -244,7 +260,7 @@ int sensor_init()
     systick_sleep(10);
 
     /* Probe the sensor */
-    sensor.slv_addr = SCCB_Probe();
+    sensor.slv_addr = cambus_scan();
     if (sensor.slv_addr == 0) {
         /* Sensor has been held in reset,
            so the reset line is active low */
@@ -255,47 +271,90 @@ int sensor_init()
         systick_sleep(10);
 
         /* Probe again to set the slave addr */
-        sensor.slv_addr = SCCB_Probe();
-        if (sensor.slv_addr == 0)  {
-            // Probe failed
-            return -2;
+        sensor.slv_addr = cambus_scan();
+        if (sensor.slv_addr == 0) {
+            sensor.pwdn_pol = ACTIVE_LOW;
+
+            DCMI_PWDN_HIGH();
+            systick_sleep(10);
+
+            sensor.slv_addr = cambus_scan();
+            if (sensor.slv_addr == 0) {
+                sensor.reset_pol = ACTIVE_HIGH;
+
+                DCMI_RESET_LOW();
+                systick_sleep(10);
+
+                sensor.slv_addr = cambus_scan();
+                if (sensor.slv_addr == 0) {
+                    return -2;
+                }
+            }
         }
     }
 
-    /* Read the sensor information */
-    sensor.id.PID  = SCCB_Read(sensor.slv_addr, REG_PID);
-    sensor.id.VER  = SCCB_Read(sensor.slv_addr, REG_VER);
-    sensor.id.MIDL = SCCB_Read(sensor.slv_addr, REG_MIDL);
-    sensor.id.MIDH = SCCB_Read(sensor.slv_addr, REG_MIDH);
+    // Clear sensor chip ID.
+    sensor.chip_id = 0;
 
-    /* Call the sensor-specific init function */
-    switch (sensor.id.PID) {
-        case OV9650_PID:
-            ov9650_init(&sensor);
-            break;
-        case OV2640_PID:
-            ov2640_init(&sensor);
-            break;
-        case OV7725_PID:
-            ov7725_init(&sensor);
-            break;
-        default:
-            /* Sensor not supported */
-            return -3;
+    // Set default snapshot function.
+    sensor.snapshot = sensor_snapshot;
+
+    if (sensor.slv_addr == LEPTON_ID) {
+        sensor.chip_id = LEPTON_ID;
+        extclk_config(25000000);
+        init_ret = lepton_init(&sensor);
+    } else {
+        // Read ON semi sensor ID.
+        cambus_readb(sensor.slv_addr, ON_CHIP_ID, &sensor.chip_id);
+        if (sensor.chip_id == MT9V034_ID) {
+            // On/Aptina MT requires 13-27MHz clock.
+            extclk_config(27000000);
+            // Only the MT9V034 is currently supported.
+            init_ret = mt9v034_init(&sensor);
+        } else { // Read OV sensor ID.
+            cambus_readb(sensor.slv_addr, OV_CHIP_ID, &sensor.chip_id);
+            // Initialize sensor struct.
+            switch (sensor.chip_id) {
+                case OV9650_ID:
+                    init_ret = ov9650_init(&sensor);
+                    break;
+                case OV2640_ID:
+                    init_ret = ov2640_init(&sensor);
+                    break;
+                case OV7725_ID:
+                    init_ret = ov7725_init(&sensor);
+                    break;
+                default:
+                    // Sensor is not supported.
+                    return -3;
+            }
+        }
+    }
+
+    if (init_ret != 0 ) {
+        // Sensor init failed.
+        return -4;
     }
 
     /* Configure the DCMI DMA Stream */
     if (dma_config() != 0) {
         // DMA problem
-        return -4;
+        return -5;
     }
 
     /* Configure the DCMI interface. This should be called
        after ovxxx_init to set VSYNC/HSYNC/PCLK polarities */
     if (dcmi_config(DCMI_JPEG_DISABLE) != 0){
         // DCMI config failed
-        return -5;
+        return -6;
     }
+
+    // Disable VSYNC EXTI IRQ
+    HAL_NVIC_DisableIRQ(DCMI_VSYNC_IRQN);
+
+    // Clear fb_enabled flag
+    // This is executed only once to initialize the FB enabled flag.
+    JPEG_FB()->enabled = 0;
 
     /* All good! */
     return 0;
@@ -304,36 +363,57 @@ int sensor_init()
 int sensor_reset()
 {
     // Reset the sesnor state
-    sensor.sde = 0xFF;
-    sensor.pixformat=0xFF;
-    sensor.framesize=0xFF;
-    sensor.framerate=0xFF;
-    sensor.gainceiling=0xFF;
-
-    // Reset image filter
-    sensor_set_line_filter(NULL, NULL);
+    sensor.sde         = 0;
+    sensor.pixformat   = 0;
+    sensor.framesize   = 0;
+    sensor.framerate   = 0;
+    sensor.gainceiling = 0;
+    sensor.vsync_gpio  = NULL;
 
     // Call sensor-specific reset function
-    sensor.reset(&sensor);
+    if (sensor.reset(&sensor) != 0) {
+        return -1;
+    }
 
     // Just in case there's a running DMA request.
     HAL_DMA_Abort(&DMAHandle);
+
+    // Disable VSYNC EXTI IRQ
+    HAL_NVIC_DisableIRQ(DCMI_VSYNC_IRQN);
     return 0;
 }
 
 int sensor_get_id()
 {
-    return sensor.id.PID;
+    return sensor.chip_id;
 }
 
-int sensor_read_reg(uint8_t reg)
+int sensor_sleep(int enable)
 {
-    return SCCB_Read(sensor.slv_addr, reg);
+    if (sensor.sleep == NULL
+        || sensor.sleep(&sensor, enable) != 0) {
+        // Operation not supported
+        return -1;
+    }
+    return 0;
 }
 
-int sensor_write_reg(uint8_t reg, uint8_t val)
+int sensor_read_reg(uint8_t reg_addr)
 {
-    return SCCB_Write(sensor.slv_addr, reg, val);
+    if (sensor.read_reg == NULL) {
+        // Operation not supported
+        return -1;
+    }
+    return sensor.read_reg(&sensor, reg_addr);
+}
+
+int sensor_write_reg(uint8_t reg_addr, uint16_t reg_data)
+{
+    if (sensor.write_reg == NULL) {
+        // Operation not supported
+        return -1;
+    }
+    return sensor.write_reg(&sensor, reg_addr, reg_data);
 }
 
 int sensor_set_pixformat(pixformat_t pixformat)
@@ -360,7 +440,7 @@ int sensor_set_pixformat(pixformat_t pixformat)
     }
 
     // Skip the first frame.
-    fb->bpp = 0;
+    MAIN_FB()->bpp = 0;
 
     return dcmi_config(jpeg_mode);
 }
@@ -383,11 +463,19 @@ int sensor_set_framesize(framesize_t framesize)
     sensor.framesize = framesize;
 
     // Skip the first frame.
-    fb->bpp = 0;
-    fb->w = resolution[framesize][0];
-    fb->h = resolution[framesize][1];
-    HAL_DCMI_DisableCROP(&DCMIHandle);
+    MAIN_FB()->bpp = 0;
 
+    // Set MAIN FB x, y offset.
+    MAIN_FB()->x = 0;
+    MAIN_FB()->y = 0;
+
+    // Set MAIN FB width and height.
+    MAIN_FB()->w = resolution[framesize][0];
+    MAIN_FB()->h = resolution[framesize][1];
+
+    // Set MAIN FB backup width and height.
+    MAIN_FB()->u = resolution[framesize][0];
+    MAIN_FB()->v = resolution[framesize][1];
     return 0;
 }
 
@@ -413,10 +501,10 @@ int sensor_set_framerate(framerate_t framerate)
 
 int sensor_set_windowing(int x, int y, int w, int h)
 {
-    fb->w = w;
-    fb->h = h;
-    HAL_DCMI_ConfigCROP(&DCMIHandle, x*2, y, w*2-1, h-1);
-    HAL_DCMI_EnableCROP(&DCMIHandle);
+    MAIN_FB()->x = x;
+    MAIN_FB()->y = y;
+    MAIN_FB()->w = MAIN_FB()->u = w;
+    MAIN_FB()->h = MAIN_FB()->v = h;
     return 0;
 }
 
@@ -484,33 +572,66 @@ int sensor_set_colorbar(int enable)
     return 0;
 }
 
-int sensor_set_auto_gain(int enable, int gain)
+int sensor_set_auto_gain(int enable, float gain_db, float gain_db_ceiling)
 {
     /* call the sensor specific function */
     if (sensor.set_auto_gain == NULL
-        || sensor.set_auto_gain(&sensor, enable, gain) != 0) {
+        || sensor.set_auto_gain(&sensor, enable, gain_db, gain_db_ceiling) != 0) {
         /* operation not supported */
         return -1;
     }
     return 0;
 }
 
-int sensor_set_auto_exposure(int enable, int exposure)
+int sensor_get_gain_db(float *gain_db)
+{
+    /* call the sensor specific function */
+    if (sensor.get_gain_db == NULL
+        || sensor.get_gain_db(&sensor, gain_db) != 0) {
+        /* operation not supported */
+        return -1;
+    }
+    return 0;
+}
+
+int sensor_set_auto_exposure(int enable, int exposure_us)
 {
     /* call the sensor specific function */
     if (sensor.set_auto_exposure == NULL
-        || sensor.set_auto_exposure(&sensor, enable, exposure) != 0) {
+        || sensor.set_auto_exposure(&sensor, enable, exposure_us) != 0) {
         /* operation not supported */
         return -1;
     }
     return 0;
 }
 
-int sensor_set_auto_whitebal(int enable, int r_gain, int g_gain, int b_gain)
+int sensor_get_exposure_us(int *exposure_us)
+{
+    /* call the sensor specific function */
+    if (sensor.get_exposure_us == NULL
+        || sensor.get_exposure_us(&sensor, exposure_us) != 0) {
+        /* operation not supported */
+        return -1;
+    }
+    return 0;
+}
+
+int sensor_set_auto_whitebal(int enable, float r_gain_db, float g_gain_db, float b_gain_db)
 {
     /* call the sensor specific function */
     if (sensor.set_auto_whitebal == NULL
-        || sensor.set_auto_whitebal(&sensor, enable, r_gain, g_gain, b_gain) != 0) {
+        || sensor.set_auto_whitebal(&sensor, enable, r_gain_db, g_gain_db, b_gain_db) != 0) {
+        /* operation not supported */
+        return -1;
+    }
+    return 0;
+}
+
+int sensor_get_rgb_gain_db(float *r_gain_db, float *g_gain_db, float *b_gain_db)
+{
+    /* call the sensor specific function */
+    if (sensor.get_rgb_gain_db == NULL
+        || sensor.get_rgb_gain_db(&sensor, r_gain_db, g_gain_db, b_gain_db) != 0) {
         /* operation not supported */
         return -1;
     }
@@ -569,61 +690,26 @@ int sensor_set_lens_correction(int enable, int radi, int coef)
     return 0;
 }
 
-int sensor_set_line_filter(line_filter_t line_filter_func, void *line_filter_args)
+int sensor_set_vsync_output(GPIO_TypeDef *gpio, uint32_t pin)
 {
-    // Set line pre-processing function and args
-    sensor.line_filter_func = line_filter_func;
-    sensor.line_filter_args = line_filter_args;
+    sensor.vsync_pin  = pin;
+    sensor.vsync_gpio = gpio;
+    // Enable VSYNC EXTI IRQ
+    HAL_NVIC_SetPriority(DCMI_VSYNC_IRQN, IRQ_PRI_EXTINT, IRQ_SUBPRI_EXTINT);
+    HAL_NVIC_EnableIRQ(DCMI_VSYNC_IRQN);
     return 0;
 }
 
-// This function is called back after each line transfer is complete,
-// with a pointer to the line buffer that was used. At this point the
-// DMA transfers the next line to the other half of the line buffer.
-// Note:  For JPEG this function is called once (and ignored) at the end of the transfer.
-void DCMI_DMAConvCpltUser(uint32_t addr)
+void DCMI_VsyncExtiCallback()
 {
-    uint8_t *src = (uint8_t*) addr;
-    uint8_t *dst = fb->pixels;
-
-    if (sensor.line_filter_func && sensor.line_filter_args) {
-        int bpp = ((sensor.pixformat == PIXFORMAT_GRAYSCALE) ? 1:2);
-        dst += line++ * fb->w * bpp;
-        // If there's an image filter installed call it.
-        // Note: BPP is the target BPP, not the line bpp (the line is always 2 bytes per pixel) if the target BPP is 1
-        // it means the image currently being read is going to be Grayscale, and the function needs to output w * 1BPP.
-        sensor.line_filter_func(src, fb->w * 2 , dst, fb->w * bpp, sensor.line_filter_args);
-    } else {
-        switch (sensor.pixformat) {
-            case PIXFORMAT_BAYER:
-                dst += line++ * fb->w;
-                for (int i=0; i<fb->w; i++) {
-                    dst[i] = src[i];
-                }
-                break;
-            case PIXFORMAT_GRAYSCALE:
-                dst += line++ * fb->w;
-                // If GRAYSCALE extract Y channel from YUV
-                for (int i=0; i<fb->w; i++) {
-                    dst[i] = src[i<<1];
-                }
-                break;
-            case PIXFORMAT_YUV422:
-            case PIXFORMAT_RGB565:
-                dst += line++ * fb->w * 2;
-                for (int i=0; i<fb->w * 2; i++) {
-                    dst[i] = src[i];
-                }
-                break;
-            case PIXFORMAT_JPEG:
-                break;
-            default:
-                break;
-        }
+    __HAL_GPIO_EXTI_CLEAR_FLAG(1 << DCMI_VSYNC_IRQ_LINE);
+    if (sensor.vsync_gpio != NULL) {
+        HAL_GPIO_WritePin(sensor.vsync_gpio, sensor.vsync_pin,
+                !HAL_GPIO_ReadPin(DCMI_VSYNC_PORT, DCMI_VSYNC_PIN));
     }
 }
 
-static void sensor_check_bufsize()
+static void sensor_check_buffsize()
 {
     int bpp=0;
     switch (sensor.pixformat) {
@@ -639,7 +725,7 @@ static void sensor_check_bufsize()
             break;
     }
 
-    if ((fb->w * fb->h * bpp) > OMV_RAW_BUF_SIZE) {
+    if ((MAIN_FB()->w * MAIN_FB()->h * bpp) > OMV_RAW_BUF_SIZE) {
         if (sensor.pixformat == PIXFORMAT_GRAYSCALE) {
             // Crop higher GS resolutions to QVGA
             sensor_set_windowing(190, 120, 320, 240);
@@ -651,92 +737,108 @@ static void sensor_check_bufsize()
 
 }
 
-// The JPEG offset allows JPEG compression of the framebuffer without overwriting the pixels.
-// The offset size may need to be adjusted depending on the quality, otherwise JPEG data may
-// overwrite image pixels before they are compressed.
-int sensor_snapshot(image_t *image, line_filter_t line_filter_func, void *line_filter_args)
+// This function is called back after each line transfer is complete,
+// with a pointer to the line buffer that was used. At this point the
+// DMA transfers the next line to the other half of the line buffer.
+// Note:  For JPEG this function is called once (and ignored) at the end of the transfer.
+void DCMI_DMAConvCpltUser(uint32_t addr)
 {
-    static int overflow_count = 0;
+    uint8_t *src = (uint8_t*) addr;
+    uint8_t *dst = MAIN_FB()->pixels;
+
+    uint16_t *src16 = (uint16_t*) addr;
+    uint16_t *dst16 = (uint16_t*) MAIN_FB()->pixels;
+
+
+    // Skip lines outside the window.
+    if (line >= MAIN_FB()->y && line <= (MAIN_FB()->y + MAIN_FB()->h)) {
+        switch (sensor.pixformat) {
+            case PIXFORMAT_BAYER:
+                dst += (line - MAIN_FB()->y) * MAIN_FB()->w;
+                for (int i=0; i<MAIN_FB()->w; i++) {
+                    dst[i] = src[MAIN_FB()->x + i];
+                }
+                break;
+            case PIXFORMAT_GRAYSCALE:
+                dst += (line - MAIN_FB()->y) * MAIN_FB()->w;
+                if (sensor.gs_bpp == 1) {
+                    // 1BPP GRAYSCALE.
+                    for (int i=0; i<MAIN_FB()->w; i++) {
+                        dst[i] = src[MAIN_FB()->x + i];
+                    }
+                } else {
+                    // Extract Y channel from YUV.
+                    for (int i=0; i<MAIN_FB()->w; i++) {
+                        dst[i] = src[MAIN_FB()->x * 2 + i * 2];
+                    }
+                }
+                break;
+            case PIXFORMAT_YUV422:
+            case PIXFORMAT_RGB565:
+                dst16 += (line - MAIN_FB()->y) * MAIN_FB()->w;
+                for (int i=0; i<MAIN_FB()->w; i++) {
+                    dst16[i] = src16[MAIN_FB()->x + i];
+                }
+                break;
+            case PIXFORMAT_JPEG:
+                break;
+            default:
+                break;
+        }
+    }
+
+    line++;
+}
+
+// This is the default snapshot function, which can be replaced in sensor_init functions. This function
+// uses the DCMI and DMA to capture frames and each line is processed in the DCMI_DMAConvCpltUser function.
+int sensor_snapshot(sensor_t *sensor, image_t *image)
+{
     uint32_t addr, length, tick_start;
-
-    // Set line filter
-    sensor_set_line_filter(line_filter_func, line_filter_args);
-
-    // Make sure the raw frame fits FB. If it doesn't it will be cropped
-    // for GS, or the sensor pixel format will be swicthed to bayer for RGB.
-    sensor_check_bufsize();
 
     // Compress the framebuffer for the IDE preview, only if it's not the first frame,
     // the framebuffer is enabled and the image sensor does not support JPEG encoding.
     // Note: This doesn't run unless the IDE is connected and the framebuffer is enabled.
-    if ((fb->bpp > 3) && JPEG_FB()->enabled && sensor.pixformat != PIXFORMAT_JPEG) {
-        // Lock FB
-        if (mutex_try_lock(&JPEG_FB()->lock, MUTEX_TID_OMV)) {
-            if(OMV_JPEG_BUF_SIZE < fb->bpp) {
-                // image won't fit. so don't copy.
-                JPEG_FB()->w = 0; JPEG_FB()->h = 0; JPEG_FB()->size = 0;
-            } else {
-                memcpy(JPEG_FB()->pixels, fb->pixels, fb->bpp);
-                JPEG_FB()->w = fb->w; JPEG_FB()->h = fb->h; JPEG_FB()->size = fb->bpp;
-            }
+    fb_update_jpeg_buffer();
 
-            // Unlock the framebuffer mutex
-            mutex_unlock(&JPEG_FB()->lock, MUTEX_TID_OMV);
-        }
-    } else if ((fb->bpp > 0) && JPEG_FB()->enabled && sensor.pixformat != PIXFORMAT_JPEG) {
-        // Lock FB
-        if (mutex_try_lock(&JPEG_FB()->lock, MUTEX_TID_OMV)) {
-            // Set JPEG src and dst images.
-            image_t src = {.w=fb->w, .h=fb->h, .bpp=fb->bpp,            .pixels=fb->pixels};
-            image_t dst = {.w=fb->w, .h=fb->h, .bpp=OMV_JPEG_BUF_SIZE,  .pixels=JPEG_FB()->pixels};
+    // Make sure the raw frame fits into the FB. If it doesn't it will be cropped if
+    // the format is set to GS, otherwise the pixel format will be swicthed to BAYER.
+    sensor_check_buffsize();
 
-            // Note: lower quality saves USB bandwidth and results in a faster IDE FPS.
-            bool overflow = jpeg_compress(&src, &dst, JPEG_FB()->quality, false);
-            if (overflow == true) {
-                // JPEG buffer overflowed, reduce JPEG quality for the next frame
-                // and skip the current frame. The IDE doesn't receive this frame.
-                if (JPEG_FB()->quality > 1) {
-                    // Keep this quality for the next n frames
-                    overflow_count = 60;
-                    JPEG_FB()->quality = IM_MAX(1, (JPEG_FB()->quality/2));
-                }
-                JPEG_FB()->w = 0; JPEG_FB()->h = 0; JPEG_FB()->size = 0;
-            } else {
-                if (overflow_count) {
-                    overflow_count--;
-                }
-                // No buffer overflow, increase quality up to max quality based on frame size
-                if (overflow_count == 0 &&
-                        JPEG_FB()->quality < ((MAIN_FB_SIZE() > JPEG_QUALITY_THRESH) ? 35:60)) {
-                    JPEG_FB()->quality++;
-                }
-                // Set FB from JPEG image
-                JPEG_FB()->w = dst.w; JPEG_FB()->h = dst.h; JPEG_FB()->size = dst.bpp;
-            }
+    // The user may have changed the MAIN_FB width or height on the last image so we need
+    // to restore that here. We don't have to restore bpp because that's taken care of
+    // already in the code below. Note that we do the JPEG compression above first to save
+    // the FB of whatever the user set it to and now we restore.
+    MAIN_FB()->w = MAIN_FB()->u;
+    MAIN_FB()->h = MAIN_FB()->v;
 
-            // Unlock the framebuffer mutex
-            mutex_unlock(&JPEG_FB()->lock, MUTEX_TID_OMV);
-        }
-    }
+    // We use the stored frame size to read the whole frame. Note that cropping is
+    // done in the line function using the diemensions stored in MAIN_FB()->x,y,w,h.
+    uint32_t w = resolution[sensor->framesize][0];
+    uint32_t h = resolution[sensor->framesize][1];
 
     // Setup the size and address of the transfer
-    switch (sensor.pixformat) {
-        case PIXFORMAT_GRAYSCALE:
+    switch (sensor->pixformat) {
         case PIXFORMAT_RGB565:
         case PIXFORMAT_YUV422:
-            // RGB, YUV and GS read 2 bytes per pixel.
-            length =(fb->w * fb->h * 2)/4;
+            // RGB/YUV read 2 bytes per pixel.
+            length = (w * h * 2)/4;
             addr = (uint32_t) &_line_buf;
             break;
         case PIXFORMAT_BAYER:
             // BAYER/RAW: 1 byte per pixel
-            length =(fb->w * fb->h * 1)/4;
+            length = (w * h * 1)/4;
+            addr = (uint32_t) &_line_buf;
+            break;
+        case PIXFORMAT_GRAYSCALE:
+            // 1/2BPP Grayscale.
+            length = (w * h * sensor->gs_bpp)/4;
             addr = (uint32_t) &_line_buf;
             break;
         case PIXFORMAT_JPEG:
             // Sensor has hardware JPEG set max frame size.
             length = MAX_XFER_SIZE;
-            addr = (uint32_t) (fb->pixels);
+            addr = (uint32_t) (MAIN_FB()->pixels);
             break;
         default:
             return -1;
@@ -751,14 +853,14 @@ int sensor_snapshot(image_t *image, line_filter_t line_filter_func, void *line_f
     // Enable DMA IRQ
     HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
 
-    if (sensor.pixformat == PIXFORMAT_JPEG) {
+    if (sensor->pixformat == PIXFORMAT_JPEG) {
         // Start a regular transfer
         HAL_DCMI_Start_DMA(&DCMIHandle,
                 DCMI_MODE_SNAPSHOT, addr, length);
     } else {
         // Start a multibuffer transfer (line by line)
         HAL_DCMI_Start_DMA_MB(&DCMIHandle,
-                DCMI_MODE_SNAPSHOT, addr, length, fb->h);
+                DCMI_MODE_SNAPSHOT, addr, length, h);
     }
 
     // Wait for frame
@@ -781,31 +883,34 @@ int sensor_snapshot(image_t *image, line_filter_t line_filter_func, void *line_f
 
     // Disable DMA IRQ
     HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);
+    
 
     // Fix the BPP
-    switch (sensor.pixformat) {
+    switch (sensor->pixformat) {
         case PIXFORMAT_GRAYSCALE:
-            fb->bpp = 1;
+            MAIN_FB()->bpp = 1;
             break;
         case PIXFORMAT_YUV422:
         case PIXFORMAT_RGB565:
-            fb->bpp = 2;
+            MAIN_FB()->bpp = 2;
             break;
         case PIXFORMAT_BAYER:
-            fb->bpp = 3;
+            MAIN_FB()->bpp = 3;
             break;
         case PIXFORMAT_JPEG:
             // Read the number of data items transferred
-            fb->bpp = (MAX_XFER_SIZE - DMAHandle.Instance->NDTR)*4;
+            MAIN_FB()->bpp = (MAX_XFER_SIZE - __HAL_DMA_GET_COUNTER(&DMAHandle))*4;
+            break;
+        default:
             break;
     }
 
     // Set the user image.
     if (image != NULL) {
-        image->w = fb->w;
-        image->h = fb->h;
-        image->bpp = fb->bpp;
-        image->pixels = fb->pixels;
+        image->w = MAIN_FB()->w;
+        image->h = MAIN_FB()->h;
+        image->bpp = MAIN_FB()->bpp;
+        image->pixels = MAIN_FB()->pixels;
     }
 
     return 0;

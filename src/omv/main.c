@@ -34,10 +34,11 @@
 #include "sdcard.h"
 #include "ff.h"
 #include "modnetwork.h"
+#include "modmachine.h"
 
+#include "extmod/vfs.h"
+#include "extmod/vfs_fat.h"
 #include "lib/utils/pyexec.h"
-#include "lib/fatfs/ff.h"
-#include "extmod/fsusermount.h"
 
 #include "irq.h"
 #include "rng.h"
@@ -52,6 +53,7 @@
 
 #include "sensor.h"
 #include "usbdbg.h"
+#include "wifi_dbg.h"
 #include "sdram.h"
 #include "fb_alloc.h"
 #include "ff_wrapper.h"
@@ -69,10 +71,12 @@
 
 #include "framebuffer.h"
 
+#include "ini.h"
+
 int errno;
 extern char _vfs_buf;
-extern char _stack_size;
-static fs_user_mount_t *vfs = (fs_user_mount_t *) &_vfs_buf;
+static fs_user_mount_t *vfs_fat = (fs_user_mount_t *) &_vfs_buf;
+pyb_thread_t pyb_thread_main;
 
 static const char fresh_main_py[] =
 "# main.py -- put your code here!\n"
@@ -90,23 +94,20 @@ static const char fresh_main_py[] =
 "   time.sleep(600)\n"
 ;
 
-static const char fresh_openmv_inf[] =
-#include "genhdr/openmv_inf.h"
-;
-
 static const char fresh_readme_txt[] =
-"This is a Micro Python board\r\n"
+"Thank you for supporting the OpenMV project!\r\n"
 "\r\n"
-"You can get started right away by writing your Python code in 'main.py'.\r\n"
+"To download the IDE, please visit:\r\n"
+"https://openmv.io/pages/download\r\n"
 "\r\n"
-"For a serial prompt:\r\n"
-" - Windows: you need to go to 'Device manager', right click on the unknown device,\r\n"
-"   then update the driver software, using the 'openmv.inf' file found on this drive.\r\n"
-"   Then use a terminal program like Hyperterminal or putty.\r\n"
-" - Mac OS X: use the command: screen /dev/tty.usbmodem*\r\n"
-" - Linux: use the command: screen /dev/ttyACM0\r\n"
+"For tutorials and documentation, please visit:\r\n"
+"http://docs.openmv.io/\r\n"
 "\r\n"
-"Please visit https://openmv.io/ or http://micropython.org/help/ for further help.\r\n"
+"For technical support and projects, please visit the forums:\r\n"
+"http://forums.openmv.io/\r\n"
+"\r\n"
+"Please use github to report bugs and issues:\r\n"
+"https://github.com/openmv/openmv\r\n"
 ;
 
 #ifdef OPENMV1
@@ -184,10 +185,14 @@ static const char fresh_selftest_py[] =
 "    print('')\n"
 "    test_int_adc()\n"
 "    test_color_bars()\n"
+"\n"
 ;
 #endif
 
 void flash_error(int n) {
+    led_state(LED_RED, 0);
+    led_state(LED_GREEN, 0);
+    led_state(LED_BLUE, 0);
     for (int i = 0; i < n; i++) {
         led_state(LED_RED, 0);
         HAL_Delay(100);
@@ -199,9 +204,12 @@ void flash_error(int n) {
 
 void NORETURN __fatal_error(const char *msg) {
     FIL fp;
-    if (f_open(&fp, "ERROR.LOG",
+    if (f_open(&vfs_fat->fatfs, &fp, "ERROR.LOG",
                FA_WRITE|FA_CREATE_ALWAYS) == FR_OK) {
-        f_printf(&fp, "\nFATAL ERROR:\n%s\n", msg);
+        UINT bytes;
+        const char *hdr = "FATAL ERROR:\n";
+        f_write(&fp, hdr, strlen(hdr), &bytes);
+        f_write(&fp, msg, strlen(msg), &bytes);
     }
     f_close(&fp);
     storage_flush();
@@ -227,55 +235,30 @@ void __attribute__((weak))
 }
 #endif
 
-STATIC mp_obj_t pyb_config_source_dir = MP_OBJ_NULL;
-STATIC mp_obj_t pyb_config_main = MP_OBJ_NULL;
-
-STATIC mp_obj_t pyb_source_dir(mp_obj_t source_dir) {
-    if (MP_OBJ_IS_STR(source_dir)) {
-        pyb_config_source_dir = source_dir;
-    }
-    return mp_const_none;
-}
-
-MP_DEFINE_CONST_FUN_OBJ_1(pyb_source_dir_obj, pyb_source_dir);
-
-STATIC mp_obj_t pyb_main(mp_obj_t main) {
-    if (MP_OBJ_IS_STR(main)) {
-        pyb_config_main = main;
-    }
-    return mp_const_none;
-}
-
-MP_DEFINE_CONST_FUN_OBJ_1(pyb_main_obj, pyb_main);
-
-static void make_flash_fs()
+void make_flash_fs()
 {
     FIL fp;
     UINT n;
 
     led_state(LED_RED, 1);
 
-    if (f_mkfs("0:", 0, 0) != FR_OK) {
-        __fatal_error("could not create LFS");
+    uint8_t working_buf[_MAX_SS];
+    if (f_mkfs(&vfs_fat->fatfs, FM_FAT, 0, working_buf, sizeof(working_buf)) != FR_OK) {
+        __fatal_error("Could not create LFS");
     }
 
-    // create default main.py
-    f_open(&fp, "main.py", FA_WRITE | FA_CREATE_ALWAYS);
+    // Create default main.py
+    f_open(&vfs_fat->fatfs, &fp, "/main.py", FA_WRITE | FA_CREATE_ALWAYS);
     f_write(&fp, fresh_main_py, sizeof(fresh_main_py) - 1 /* don't count null terminator */, &n);
     f_close(&fp);
 
-    // create .inf driver file
-    f_open(&fp, "openmv.inf", FA_WRITE | FA_CREATE_ALWAYS);
-    f_write(&fp, fresh_openmv_inf, sizeof(fresh_openmv_inf) - 1 /* don't count null terminator */, &n);
-    f_close(&fp);
-
-    // create readme file
-    f_open(&fp, "README.txt", FA_WRITE | FA_CREATE_ALWAYS);
+    // Create readme file
+    f_open(&vfs_fat->fatfs, &fp, "/README.txt", FA_WRITE | FA_CREATE_ALWAYS);
     f_write(&fp, fresh_readme_txt, sizeof(fresh_readme_txt) - 1 /* don't count null terminator */, &n);
     f_close(&fp);
 
-    // create default selftest.py
-    f_open(&fp, "selftest.py", FA_WRITE | FA_CREATE_ALWAYS);
+    // Create default selftest.py
+    f_open(&vfs_fat->fatfs, &fp, "/selftest.py", FA_WRITE | FA_CREATE_ALWAYS);
     f_write(&fp, fresh_selftest_py, sizeof(fresh_selftest_py) - 1 /* don't count null terminator */, &n);
     f_close(&fp);
 
@@ -293,10 +276,145 @@ void NORETURN __stack_chk_fail(void)
 }
 #endif
 
+typedef struct apply_settings_user
+{
+    wifi_dbg_settings_t wifi_dbg_settings;
+}
+apply_settings_user_t;
+
+extern char *strncpy(char *dst, const char *src, size_t n);
+
+static bool ini_handler_callback_is_true(const char *value)
+{
+    int i = ini_atoi(value);
+    if (i) return true;
+    if (strlen(value) != 4) return false;
+    if ((value[0] != 'T') && (value[0] != 't')) return false;
+    if ((value[1] != 'R') && (value[1] != 'r')) return false;
+    if ((value[2] != 'U') && (value[2] != 'u')) return false;
+    if ((value[3] != 'E') && (value[3] != 'e')) return false;
+    return true;
+}
+
+int ini_handler_callback(void *user, const char *section, const char *name, const char *value)
+{
+    apply_settings_user_t *apply_settings_user = (apply_settings_user_t *) user;
+
+    #define MATCH(s, n) ((strcmp(section, (s)) == 0) && (strcmp(name, (n)) == 0))
+
+    if (MATCH("BootSettings", "REPLUart")) {
+        if (ini_handler_callback_is_true(value)) {
+            mp_obj_t args[2] = {
+                MP_OBJ_NEW_SMALL_INT(3), // UART Port
+                MP_OBJ_NEW_SMALL_INT(115200) // Baud Rate
+            };
+
+            MP_STATE_PORT(pyb_stdio_uart) = pyb_uart_type.make_new((mp_obj_t) &pyb_uart_type, MP_ARRAY_SIZE(args), 0, args);
+        }
+    } else if (MATCH("BootSettings", "WiFiMode")) {
+        apply_settings_user->wifi_dbg_settings.wifi_mode = ini_atoi(value);
+    } else if (MATCH("BootSettings", "ClientModeSSID")) {
+        strncpy(apply_settings_user->wifi_dbg_settings.wifi_client_ssid, name, SSID_MAX);
+    } else if (MATCH("BootSettings", "ClientModePass")) {
+        strncpy(apply_settings_user->wifi_dbg_settings.wifi_client_pass, name, PASS_MAX);
+    } else if (MATCH("BootSettings", "ClientModeType")) {
+        apply_settings_user->wifi_dbg_settings.wifi_client_type = ini_atoi(value);
+    } else if (MATCH("BootSettings", "AccessPointModeSSID")) {
+        strncpy(apply_settings_user->wifi_dbg_settings.wifi_ap_ssid, name, SSID_MAX);
+    } else if (MATCH("BootSettings", "AccessPointModePass")) {
+        strncpy(apply_settings_user->wifi_dbg_settings.wifi_ap_pass, name, SSID_MAX);
+    } else if (MATCH("BootSettings", "AccessPointModeType")) {
+        apply_settings_user->wifi_dbg_settings.wifi_ap_type = ini_atoi(value);
+    } else if (MATCH("BootSettings", "BoardName")) {
+        strncpy(apply_settings_user->wifi_dbg_settings.wifi_board_name, name, NAME_MAX);
+    } else {
+        return 0;
+    }
+
+    return 1;
+
+    #undef MATCH
+}
+
+FRESULT apply_settings(const char *path)
+{
+    nlr_buf_t nlr;
+    FRESULT f_res = f_stat(&vfs_fat->fatfs, path, NULL);
+
+    if (f_res == FR_OK) {
+        if (nlr_push(&nlr) == 0) {
+            apply_settings_user_t apply_settings_user = {};
+            ini_parse(&vfs_fat->fatfs, path, ini_handler_callback, &apply_settings_user);
+            wifi_dbg_apply_settings(&apply_settings_user.wifi_dbg_settings);
+            nlr_pop();
+        }
+    }
+
+    return f_res;
+}
+
+FRESULT exec_boot_script(const char *path, bool selftest, bool interruptible)
+{
+    nlr_buf_t nlr;
+    bool interrupted = false;
+    FRESULT f_res = f_stat(&vfs_fat->fatfs, path, NULL);
+
+    if (f_res == FR_OK) {
+        if (nlr_push(&nlr) == 0) {
+            // Parse and compile the script.
+            mp_obj_t code = pyexec_compile_file(path);
+
+            // Enable IDE interrupts if allowed.
+            if (interruptible) {
+                usbdbg_set_irq_enabled(true);
+                usbdbg_set_script_running(true);
+            }
+
+            // Execute the compiled script.
+            pyexec_exec_code(code);
+            nlr_pop();
+        } else {
+            interrupted = true;
+        }
+    }
+
+    // Disable IDE interrupts
+    usbdbg_set_irq_enabled(false);
+    usbdbg_set_script_running(false);
+
+    if (interrupted) {
+        if (selftest) {
+            // Get the exception message. TODO: might be a hack.
+            mp_obj_str_t *str = mp_obj_exception_get_value((mp_obj_t)nlr.ret_val);
+            // If any of the self-tests fail log the exception message
+            // and loop forever. Note: IDE exceptions will not be caught.
+            __fatal_error((const char*) str->data);
+        } else {
+            mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+            if (nlr_push(&nlr) == 0) {
+                flash_error(3);
+                nlr_pop();
+            }// If this gets interrupted again ignore it.
+        }
+    }
+
+    if (selftest && f_res == FR_OK) {
+        // Remove self tests script and flush cache
+        f_unlink(&vfs_fat->fatfs, path);
+        storage_flush();
+
+        // Set flag for SWD debugger.
+        // Note: main.py does not use the frame buffer.
+        MAIN_FB()->bpp = 0xDEADBEEF;
+    }
+
+    return f_res;
+}
+
 int main(void)
 {
-    FRESULT f_res;
     int sensor_init_ret = 0;
+    bool sdcard_mounted = false;
     bool first_soft_reset = true;
 
     // Uncomment to disable write buffer to get precise faults.
@@ -307,17 +425,13 @@ int main(void)
     //  - Set NVIC Group Priority to 4
     //  - Configure the Flash prefetch, instruction and Data caches
     //  - Configure the Systick to generate an interrupt each 1 msec
-    //  Note: The bootloader enables the CCM/DTCM memory.
+    //  NOTE: The bootloader enables the CCM/DTCM memory.
     HAL_Init();
 
-    // Stack limit should be less than real stack size, so we have a chance
-    // to recover from limit hit.  (Limit is measured in bytes.)
-    mp_stack_ctrl_init();
-    mp_stack_set_limit((char*)&_ram_end - (char*)&_heap_end - 1024);
-
-    // basic sub-system init
+    // Basic sub-system init
     led_init();
     pendsv_init();
+    pyb_thread_init(&pyb_thread_main);
 
     // Re-enable IRQs (disabled by bootloader)
     __enable_irq();
@@ -328,6 +442,16 @@ soft_reset:
     led_state(LED_GREEN, 1);
     led_state(LED_BLUE, 1);
 
+    machine_init();
+
+    // Python threading init
+    mp_thread_init();
+
+    // Stack limit should be less than real stack size, so we have a
+    // chance to recover from limit hit. (Limit is measured in bytes)
+    mp_stack_set_top(&_ram_end);
+    mp_stack_set_limit((char*)&_ram_end - (char*)&_heap_end - 1024);
+
     // GC init
     gc_init(&_heap_start, &_heap_end);
 
@@ -336,22 +460,19 @@ soft_reset:
     mp_obj_list_init(mp_sys_path, 0);
     mp_obj_list_init(mp_sys_argv, 0);
 
-    // zero out the pointers to the mounted devices
-    memset(MP_STATE_PORT(fs_user_mount), 0, sizeof(MP_STATE_PORT(fs_user_mount)));
-
-    // Initialise low-level sub-systems.  Here we need to very basic things like
-    // zeroing out memory and resetting any of the sub-systems.  Following this
-    // we can run Python scripts (eg main.py).
-
+    // Initialise low-level sub-systems. Here we need to do the very basic
+    // things like zeroing out memory and resetting any of the sub-systems.
     readline_init0();
     pin_init0();
     extint_init0();
     timer_init0();
+    #if MICROPY_HW_ENABLE_CAN
     can_init0();
-    rng_init0();
+    #endif
     i2c_init0();
     spi_init0();
     uart_init0();
+    MP_STATE_PORT(pyb_stdio_uart) = NULL; // need to zero
     dac_init();
     pyb_usb_init0();
     sensor_init0();
@@ -359,12 +480,14 @@ soft_reset:
     file_buffer_init0();
     py_lcd_init0();
     py_fir_init0();
+    servo_init();
+    usbdbg_init();
+    wifi_dbg_init();
+    sdcard_init();
 
-#if MICROPY_HW_ENABLE_RTC
     if (first_soft_reset) {
-        rtc_init();
+        rtc_init_start(false);
     }
-#endif
 
     // Initialize the sensor and check the result after
     // mounting the file-system to log errors (if any).
@@ -372,8 +495,6 @@ soft_reset:
         sensor_init_ret = sensor_init();
     }
 
-    servo_init();
-    usbdbg_init();
     mod_network_init();
 
     // Remove the BASEPRI masking (if any)
@@ -381,60 +502,60 @@ soft_reset:
 
     // Initialize storage
     if (sdcard_is_present()) {
-        sdcard_init();
-        // init the vfs object
-        vfs->str = "1:";
-        vfs->len = 2;
-        vfs->flags = 0;
-        sdcard_init_vfs(vfs);
+        // Init the vfs object
+        vfs_fat->flags = 0;
+        sdcard_init_vfs(vfs_fat, 1);
 
-        // put the sdcard device in slot 1 (it will be unused at this point)
-        MP_STATE_PORT(fs_user_mount)[1] = vfs;
-
-        // try to mount the flash
-        FRESULT res = f_mount(&vfs->fatfs, vfs->str, 1);
+        // Try to mount the SD card
+        FRESULT res = f_mount(&vfs_fat->fatfs);
         if (res != FR_OK) {
-            __fatal_error("could not mount SD\n");
+            sdcard_mounted = false;
+        } else {
+            sdcard_mounted = true;
+            // Set USB medium to SD
+            pyb_usb_storage_medium = PYB_USB_STORAGE_MEDIUM_SDCARD;
         }
-        // Set CWD and USB medium to SD
-        f_chdrive("1:");
-        pyb_usb_storage_medium = PYB_USB_STORAGE_MEDIUM_SDCARD;
-    } else {
+    }
+
+    if (sdcard_mounted == false) {
         storage_init();
 
         // init the vfs object
-        vfs->str = "0:";
-        vfs->len = 2;
-        vfs->flags = 0;
-        pyb_flash_init_vfs(vfs);
+        vfs_fat->flags = 0;
+        pyb_flash_init_vfs(vfs_fat);
 
-        // put the flash device in slot 0 (it will be unused at this point)
-        MP_STATE_PORT(fs_user_mount)[0] = vfs;
-
-        // try to mount the flash
-        FRESULT res = f_mount(&vfs->fatfs, vfs->str, 1);
+        // Try to mount the flash
+        FRESULT res = f_mount(&vfs_fat->fatfs);
 
         if (res == FR_NO_FILESYSTEM) {
-            // create a fresh fs
+            // Create a fresh fs
             make_flash_fs();
+            // Flush storage
+            storage_flush();
         } else if (res != FR_OK) {
-            __fatal_error("could not access LFS\n");
+            __fatal_error("Could not access LFS\n");
         }
 
-        // Set CWD and USB medium to flash
-        f_chdrive("0:");
+        // Set USB medium to flash
         pyb_usb_storage_medium = PYB_USB_STORAGE_MEDIUM_FLASH;
     }
 
-    // turn boot-up LEDs off
-    led_state(LED_RED, 0);
-    led_state(LED_GREEN, 0);
-    led_state(LED_BLUE, 0);
-
-    // init USB device to default setting if it was not already configured
-    if (!(pyb_usb_flags & PYB_USB_FLAG_USB_MODE_CALLED)) {
-        pyb_usb_dev_init(USBD_VID, USBD_PID_CDC_MSC, USBD_MODE_CDC_MSC, NULL);
+    // Mount the storage device (there should be no other devices mounted at this point)
+    // we allocate this structure on the heap because vfs->next is a root pointer.
+    mp_vfs_mount_t *vfs = m_new_obj_maybe(mp_vfs_mount_t);
+    if (vfs == NULL) {
+        __fatal_error("Failed to alloc memory for vfs mount\n");
     }
+
+    vfs->str = "/";
+    vfs->len = 1;
+    vfs->obj = MP_OBJ_FROM_PTR(vfs_fat);
+    vfs->next = NULL;
+    MP_STATE_VM(vfs_mount_table) = vfs;
+    MP_STATE_PORT(vfs_cur) = vfs;
+
+    // Init USB device to default setting if it was not already configured
+    pyb_usb_dev_init(USBD_VID, USBD_PID_CDC_MSC, USBD_MODE_CDC_MSC, NULL);
 
     // check sensor init result
     if (first_soft_reset && sensor_init_ret != 0) {
@@ -443,57 +564,17 @@ soft_reset:
         __fatal_error(buf);
     }
 
-    // Run self tests the first time only
-    f_res = f_stat("selftest.py", NULL);
-    if (first_soft_reset && f_res == FR_OK) {
-        nlr_buf_t nlr;
-        if (nlr_push(&nlr) == 0) {
-            // Parse, compile and execute the self-tests script.
-            pyexec_file("selftest.py");
-            nlr_pop();
-        } else {
-            // Get the exception message. TODO: might be a hack.
-            mp_obj_str_t *str = mp_obj_exception_get_value((mp_obj_t)nlr.ret_val);
-            // If any of the self-tests fail log the exception message
-            // and loop forever. Note: IDE exceptions will not be caught.
-            __fatal_error((const char*) str->data);
-        }
-        // Success: remove self tests script and flush cache
-        f_unlink("selftest.py");
-        storage_flush();
-        // Set flag for SWD debugger (main.py does not use the frame buffer).
-        MAIN_FB()->bpp = 0xDEADBEEF;
+    // Turn boot-up LEDs off
+    led_state(LED_RED, 0);
+    led_state(LED_GREEN, 0);
+    led_state(LED_BLUE, 0);
+
+    // Run boot script(s)
+    if (first_soft_reset) {
+        exec_boot_script("/selftest.py", true, false);
+        apply_settings("/openmv.config");
+        exec_boot_script("/main.py", false, true);
     }
-
-    // Run the main script from the current directory.
-    f_res = f_stat("main.py", NULL);
-    if (first_soft_reset && f_res == FR_OK) {
-        nlr_buf_t nlr;
-        if (nlr_push(&nlr) == 0) {
-            // Enable IDE interrupt
-            usbdbg_set_irq_enabled(true);
-            // Allow the IDE to interrupt main.py
-            usbdbg_set_script_running(true);
-
-            // Parse, compile and execute the main script.
-            pyexec_file("main.py");
-            nlr_pop();
-        } else {
-            // Disable IDE interrupt and clear script running
-            usbdbg_set_irq_enabled(false);
-            usbdbg_set_script_running(false);
-
-            mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
-            if (nlr_push(&nlr) == 0) {
-                flash_error(3);
-                nlr_pop();
-            }// if this gets interrupted again ignore it.
-        }
-    }
-
-    // Disable IDE interrupt and clear script running
-    usbdbg_set_irq_enabled(false);
-    usbdbg_set_script_running(false);
 
     // If there's no script ready, just re-exec REPL
     while (!usbdbg_script_ready()) {
@@ -520,13 +601,16 @@ soft_reset:
 
     if (usbdbg_script_ready()) {
         nlr_buf_t nlr;
-
-        // execute the script
         if (nlr_push(&nlr) == 0) {
-            // enable IDE interrupt
+            // Parse and compile the script
+            vstr_t *buf = usbdbg_get_script();
+            mp_obj_t code = pyexec_compile_str(buf);
+
+            // Enable IDE interrupt
             usbdbg_set_irq_enabled(true);
 
-            pyexec_str(usbdbg_get_script());
+            // Execute the compiled script
+            pyexec_exec_code(code);
             nlr_pop();
         } else {
             mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
@@ -541,9 +625,11 @@ soft_reset:
     storage_flush();
     timer_deinit();
     uart_deinit();
+    #if MICROPY_HW_ENABLE_CAN
     can_deinit();
+    #endif
+    pyb_thread_deinit();
 
     first_soft_reset = false;
     goto soft_reset;
-
 }

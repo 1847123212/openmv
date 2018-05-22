@@ -30,7 +30,13 @@ mp_obj_t py_clock_fps(mp_obj_t clock_obj)
     py_clock_obj_t *clock = (py_clock_obj_t*) clock_obj;
     clock->t_frame++;
     clock->t_ticks += (systick_current_millis()-clock->t_start);
-    return mp_obj_new_float(1000.0f/(clock->t_ticks/(float)clock->t_frame));
+    float fps = 1000.0f / (clock->t_ticks/(float)clock->t_frame);
+    if (clock->t_ticks >= 2000) {
+        // Reset the FPS clock every 2s
+        clock->t_frame = 0;
+        clock->t_ticks = 0;
+    }
+    return mp_obj_new_float(fps);
 }
 
 mp_obj_t py_clock_avg(mp_obj_t clock_obj)
@@ -119,6 +125,5 @@ STATIC MP_DEFINE_CONST_DICT(globals_dict, globals_dict_table);
 
 const mp_obj_module_t time_module = {
     .base = { &mp_type_module },
-    .name = MP_QSTR_time,
     .globals = (mp_obj_t)&globals_dict,
 };

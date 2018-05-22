@@ -20,9 +20,9 @@ GRAYSCALE_THRESHOLD = [(0, 64)]
 # will then be averaged with different weights where the most weight is assigned
 # to the roi near the bottom of the image and less to the next roi and so on.
 ROIS = [ # [ROI, weight]
-        (0, 100, 160, 20, 0.7), # You'll need to tweak the weights for you app
-        (0, 050, 160, 20, 0.3), # depending on how your robot is setup.
-        (0, 000, 160, 20, 0.1)
+        (0, 100, 160, 20, 0.7), # You'll need to tweak the weights for your app
+        (0,  50, 160, 20, 0.3), # depending on how your robot is setup.
+        (0,   0, 160, 20, 0.1)
        ]
 
 # Compute the weight divisor (we're computing this so you don't have to make weights add to 1).
@@ -33,7 +33,7 @@ for r in ROIS: weight_sum += r[4] # r[4] is the roi weight.
 sensor.reset() # Initialize the camera sensor.
 sensor.set_pixformat(sensor.GRAYSCALE) # use grayscale.
 sensor.set_framesize(sensor.QQVGA) # use QQVGA for speed.
-sensor.skip_frames(30) # Let new settings take affect.
+sensor.skip_frames(time = 2000) # Let new settings take affect.
 sensor.set_auto_gain(False) # must be turned off for color tracking
 sensor.set_auto_whitebal(False) # must be turned off for color tracking
 clock = time.clock() # Tracks FPS.
@@ -43,23 +43,20 @@ while(True):
     img = sensor.snapshot() # Take a picture and return the image.
 
     centroid_sum = 0
+
     for r in ROIS:
         blobs = img.find_blobs(GRAYSCALE_THRESHOLD, roi=r[0:4], merge=True) # r[0:4] is roi tuple.
+
         if blobs:
-            # Find the index of the blob with the most pixels.
-            most_pixels = 0
-            largest_blob = 0
-            for i in range(len(blobs)):
-                if blobs[i].pixels() > most_pixels:
-                    most_pixels = blobs[i].pixels()
-                    largest_blob = i
+            # Find the blob with the most pixels.
+            largest_blob = max(blobs, key=lambda b: b.pixels())
 
             # Draw a rect around the blob.
-            img.draw_rectangle(blobs[largest_blob].rect())
-            img.draw_cross(blobs[largest_blob].cx(),
-                           blobs[largest_blob].cy())
+            img.draw_rectangle(largest_blob.rect())
+            img.draw_cross(largest_blob.cx(),
+                           largest_blob.cy())
 
-            centroid_sum += blobs[largest_blob].cx() * r[4] # r[4] is the roi weight.
+            centroid_sum += largest_blob.cx() * r[4] # r[4] is the roi weight.
 
     center_pos = (centroid_sum / weight_sum) # Determine center of line.
 
@@ -68,6 +65,7 @@ while(True):
     # are. Non-linear operations are good to use on the output of algorithms
     # like this to cause a response "trigger".
     deflection_angle = 0
+
     # The 80 is from half the X res, the 60 is from half the Y res. The
     # equation below is just computing the angle of a triangle where the
     # opposite side of the triangle is the deviation of the center position

@@ -1,4 +1,80 @@
 # Change Log
+## [2.9](https://github.com/openmv/openmv/releases/tag/v2.9) (2018-05-06)
+* Fix BAYER boundary issue.
+* Re-enable SD DMA transfers.
+* Fix bug in non-DMA SD transfers.
+* Add FLIR Lepton1/2/3 support.
+
+## [2.8](https://github.com/openmv/openmv/releases/tag/v2.8) (2018-04-23)
+* Improved H7 support.
+* Enable text scaling.
+* Fix Image.save bug.
+* Make imlib more configurable.
+* Update MicroPython.
+* Add CMSIS NN example.
+* Add new example scripts.
+* Improved JPEG quality (for M7 and H7).
+* Add color thresholding support to get_histogram/stats.
+
+## [2.7](https://github.com/openmv/openmv/releases/tag/v2.7) (2018-01-24)
+* Add LeNet NN.
+* Add shadow removal.
+* Implement low-power modes.
+* Update WINC firmware.
+* Update gain, exposure and white balance controls.
+* Add MQTT library and example.
+* Support BAYER get_pixel().
+* Fix getaddrinfo bug.
+* Fix find template bug.
+
+## [2.6](https://github.com/openmv/openmv/releases/tag/v2.6) (2017-11-04)
+* Update to MicroPython 1.9.2
+* Support saving bayer (raw) images.
+* Add perspective rotation correction code.
+* Fix blob density.
+* Fix color VGA image save.
+* Remove invalid resolutions. 
+
+## [2.5](https://github.com/openmv/openmv/releases/tag/v2.5) (2017-08-10)
+* Fix UART timeout when using slow baudrate.
+* Enable RTC.
+* Remove openmv.inf and update Readme.
+* Support recording and viewing raw videos.
+* Add linear regression.
+* Add find_rectangles and find_circles.
+* Improve find_lines merging.
+* Fix bug in ORB matching descriptor loaded from file.
+* Support new OpenCV Haar format.
+* Fix bug in Haar cascades loading.
+* Add initial LeNet port.
+* Add unit-tests.
+* Fix uninitialized FB enabled bug.
+* Fix Servo(3).
+* Fix MJPEG/GIF BAYER support.
+
+## [2.4.1](https://github.com/openmv/openmv/releases/tag/v2.4.1) (2017-06-04)
+* Upstream Kanji fix.
+* Upstream MP SCSI fix.
+* Fix binary ops names.
+
+## [2.4](https://github.com/openmv/openmv/releases/tag/v2.4) (2017-05-30)
+* Implement faster line detection algorithm.
+* Support line segments detection.
+* Support higher FPS on OpenMV 2 and 3.
+* Add data matrix support.
+* Add more small resolutions.
+* Enable UART1 on OpenMV3/M7
+* Enable VSYNC output on IO pin.
+* Fix QR Code bug.
+* Fix UDP recvfrom bug.
+* Minor fixes, typos and docs updates.
+
+## [2.3](https://github.com/openmv/openmv/releases/tag/v2.3) (2017-03-26)
+* Support WiFi Access Point mode.
+* New BAYER/RAW pixel format.
+* Support RGB VGA frames.
+* 1D barcode support using (zbar).
+
 ## [2.2](https://github.com/openmv/openmv/releases/tag/v2.2) (2017-02-28)
 * Add Apriltags support
 * Fix OMV3 bootloader LED pins

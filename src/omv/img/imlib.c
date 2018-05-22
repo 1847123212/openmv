@@ -13,6 +13,7 @@
 #include "ff_wrapper.h"
 #include "imlib.h"
 #include "common.h"
+#include "omv_boardconfig.h"
 
 /////////////////
 // Point Stuff //
@@ -39,6 +40,59 @@ int point_quadrance(point_t *ptr0, point_t *ptr1)
     int delta_x = ptr0->x - ptr1->x;
     int delta_y = ptr0->y - ptr1->y;
     return (delta_x * delta_x) + (delta_y * delta_y);
+}
+
+////////////////
+// Line Stuff //
+////////////////
+
+// http://www.skytopia.com/project/articles/compsci/clipping.html
+bool lb_clip_line(line_t *l, int x, int y, int w, int h) // line is drawn if this returns true
+{
+    int xdelta = l->x2 - l->x1, ydelta = l->y2 - l->y1, p[4], q[4];
+    float umin = 0, umax = 1;
+
+    p[0] = -(xdelta);
+    p[1] = +(xdelta);
+    p[2] = -(ydelta);
+    p[3] = +(ydelta);
+
+    q[0] = l->x1 - (x);
+    q[1] = (x + w - 1) - l->x1;
+    q[2] = l->y1 - (y);
+    q[3] = (y + h - 1) - l->y1;
+
+    for (int i = 0; i < 4; i++) {
+        if (p[i]) {
+            float u = ((float) q[i]) / ((float) p[i]);
+
+            if (p[i] < 0) { // outside to inside
+                if (u > umax) return false;
+                if (u > umin) umin = u;
+            }
+
+            if (p[i] > 0) { // inside to outside
+                if (u < umin) return false;
+                if (u < umax) umax = u;
+            }
+
+        } else if (q[i] < 0) {
+            return false;
+        }
+    }
+
+    if (umax < umin) return false;
+
+    int x1_c = l->x1 + (xdelta * umin);
+    int y1_c = l->y1 + (ydelta * umin);
+    int x2_c = l->x1 + (xdelta * umax);
+    int y2_c = l->y1 + (ydelta * umax);
+    l->x1 = x1_c;
+    l->y1 = y1_c;
+    l->x2 = x2_c;
+    l->y2 = y2_c;
+
+    return true;
 }
 
 /////////////////////
@@ -117,6 +171,49 @@ void image_copy(image_t *dst, image_t *src)
     memcpy(dst, src, sizeof(image_t));
 }
 
+size_t image_size(image_t *ptr)
+{
+    switch (ptr->bpp) {
+        case IMAGE_BPP_BINARY: {
+            return IMAGE_BINARY_LINE_LEN_BYTES(ptr) * ptr->h;
+        }
+        case IMAGE_BPP_GRAYSCALE: {
+            return IMAGE_GRAYSCALE_LINE_LEN_BYTES(ptr) * ptr->h;
+        }
+        case IMAGE_BPP_RGB565: {
+            return IMAGE_RGB565_LINE_LEN_BYTES(ptr) * ptr->h;
+        }
+        case IMAGE_BPP_BAYER: {
+            return ptr->w * ptr->h;
+        }
+        default: { // JPEG
+            return ptr->bpp;
+        }
+    }
+}
+
+bool image_get_mask_pixel(image_t *ptr, int x, int y)
+{
+    if ((0 <= x) && (x < ptr->w) && (0 <= y) && (y < ptr->h)) {
+        switch (ptr->bpp) {
+            case IMAGE_BPP_BINARY: {
+                return IMAGE_GET_BINARY_PIXEL(ptr, x, y);
+            }
+            case IMAGE_BPP_GRAYSCALE: {
+                return COLOR_GRAYSCALE_TO_BINARY(IMAGE_GET_GRAYSCALE_PIXEL(ptr, x, y));
+            }
+            case IMAGE_BPP_RGB565: {
+                return COLOR_RGB565_TO_BINARY(IMAGE_GET_RGB565_PIXEL(ptr, x, y));
+            }
+            default: {
+                return false;
+            }
+        }
+    }
+
+    return false;
+}
+
 // Gamma uncompress
 extern const float xyz_table[256];
 
@@ -134,13 +231,13 @@ const int8_t kernel_gauss_5[5*5] = {
     1,  4,  6,  4, 1
 };
 
-const int8_t kernel_laplacian_3[3*3] = {
+const int kernel_laplacian_3[3*3] = {
      -1, -1, -1,
      -1,  8, -1,
      -1, -1, -1
 };
 
-const int8_t kernel_high_pass_3[3*3] = {
+const int kernel_high_pass_3[3*3] = {
     -1, -1, -1,
     -1, +8, -1,
     -1, -1, -1
@@ -221,6 +318,64 @@ ALWAYS_INLINE uint16_t imlib_yuv_to_rgb(uint8_t y, int8_t u, int8_t v)
     return IM_RGB565(IM_R825(r), IM_G826(g), IM_B825(b));
 }
 
+void imlib_bayer_to_rgb565(image_t *img, int w, int h, int xoffs, int yoffs, uint16_t *rgbbuf)
+{
+    int r, g, b;
+    for (int y=yoffs; y<yoffs+h; y++) {
+        for (int x=xoffs; x<xoffs+w; x++) {
+            if ((y % 2) == 0) { // Even row
+                if ((x % 2) == 0) { // Even col
+                    r = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x-1, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x+1, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x-1, y+1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x+1, y+1)) >> 2;
+
+                    g = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y+1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x-1, y)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x+1, y)) >> 2;
+
+                    b = IM_GET_RAW_PIXEL(img,  x, y);
+                } else { // Odd col
+                    r = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y+1)) >> 1;
+
+                    b = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x-1, y)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x+1, y)) >> 1;
+
+                    g =  IM_GET_RAW_PIXEL(img, x, y);
+                }
+            } else { // Odd row
+                if ((x % 2) == 0) { // Even Col
+                    r = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x-1, y)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x+1, y)) >> 1;
+
+                    g =  IM_GET_RAW_PIXEL(img, x, y);
+
+                    b = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y+1)) >> 1;
+                } else { // Odd col
+                    r = IM_GET_RAW_PIXEL(img,  x, y);
+
+                    g = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_Y(img, x, y+1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x-1, y)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_X(img, x+1, y)) >> 2;
+
+                    b = (IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x-1, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x+1, y-1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x-1, y+1)  +
+                         IM_GET_RAW_PIXEL_CHECK_BOUNDS_XY(img, x+1, y+1)) >> 2;
+                }
+
+            }
+            r = IM_R825(r);
+            g = IM_G826(g);
+            b = IM_B825(b);
+            *rgbbuf++ = IM_RGB565(r, g, b);
+        }
+    }
+}
 ////////////////////////////////////////////////////////////////////////////////
 
 static save_image_format_t imblib_parse_extension(image_t *img, const char *path)
@@ -248,9 +403,8 @@ static save_image_format_t imblib_parse_extension(image_t *img, const char *path
                &&  ((p[-2] == 'm') || (p[-2] == 'M'))
                &&  ((p[-3] == 'b') || (p[-3] == 'B'))
                &&  ((p[-4] == '.') || (p[-4] == '.'))) {
-                    if (IM_IS_JPEG(img)) {
-                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError,
-                        "Image is not BMP!"));
+                    if (IM_IS_JPEG(img) || IM_IS_BAYER(img)) {
+                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Image is not BMP!"));
                     }
                     return FORMAT_BMP;
         } else if (((p[-1] == 'm') || (p[-1] == 'M'))
@@ -258,8 +412,7 @@ static save_image_format_t imblib_parse_extension(image_t *img, const char *path
                &&  ((p[-3] == 'p') || (p[-3] == 'P'))
                &&  ((p[-4] == '.') || (p[-4] == '.'))) {
                     if (!IM_IS_RGB565(img)) {
-                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError,
-                        "Image is not PPM!"));
+                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Image is not PPM!"));
                     }
                     return FORMAT_PNM;
         } else if (((p[-1] == 'm') || (p[-1] == 'M'))
@@ -267,11 +420,19 @@ static save_image_format_t imblib_parse_extension(image_t *img, const char *path
                &&  ((p[-3] == 'p') || (p[-3] == 'P'))
                &&  ((p[-4] == '.') || (p[-4] == '.'))) {
                     if (!IM_IS_GS(img)) {
-                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError,
-                        "Image is not PGM!"));
+                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Image is not PGM!"));
                     }
                     return FORMAT_PNM;
+        } else if (((p[-1] == 'w') || (p[-1] == 'W'))
+               &&  ((p[-2] == 'a') || (p[-2] == 'A'))
+               &&  ((p[-3] == 'r') || (p[-3] == 'R'))
+               &&  ((p[-4] == '.') || (p[-4] == '.'))) {
+                    if (!IM_IS_BAYER(img)) {
+                        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Image is not BAYER!"));
+                    }
+                    return FORMAT_RAW;
         }
+
     }
     return FORMAT_DONT_CARE;
 }
@@ -306,20 +467,18 @@ bool imlib_read_geometry(FIL *fp, image_t *img, const char *path, img_read_setti
 static void imlib_read_pixels(FIL *fp, image_t *img, int line_start, int line_end, img_read_settings_t *rs)
 {
     switch (rs->format) {
-        case FORMAT_DONT_CARE: // won't happen
-            break;
         case FORMAT_BMP:
             bmp_read_pixels(fp, img, line_start, line_end, &rs->bmp_rs);
             break;
         case FORMAT_PNM:
             ppm_read_pixels(fp, img, line_start, line_end, &rs->ppm_rs);
             break;
-        case FORMAT_JPG: // won't happen
+        default: // won't happen
             break;
     }
 }
 
-void imlib_image_operation(image_t *img, const char *path, image_t *other, line_op_t op)
+void imlib_image_operation(image_t *img, const char *path, image_t *other, int scalar, line_op_t op, void *data)
 {
     if (path) {
         uint32_t size = fb_avail() / 2;
@@ -351,21 +510,69 @@ void imlib_image_operation(image_t *img, const char *path, image_t *other, line_
             imlib_read_pixels(&fp, &temp, 0, can_do, &rs);
             for (int j=0; j<can_do; j++) {
                 if (!vflipped) {
-                    op(img, i+j, temp.pixels+(temp.w*temp.bpp*j));
+                    op(img, i+j, temp.pixels+(temp.w*temp.bpp*j), data, false);
                 } else {
-                    op(img, (img->h-i-can_do)+j, temp.pixels+(temp.w*temp.bpp*j));
+                    op(img, (img->h-i-can_do)+j, temp.pixels+(temp.w*temp.bpp*j), data, true);
                 }
             }
         }
         file_buffer_off(&fp);
         file_close(&fp);
         fb_free();
-    } else {
+    } else if (other) {
         if (!IM_EQUAL(img, other)) {
             ff_not_equal(NULL);
         }
         for (int i=0; i<img->h; i++) {
-            op(img, i, other->pixels + (img->w * img->bpp * i));
+            op(img, i, other->pixels + (img->w * img->bpp * i), data, false);
+        }
+    } else {
+        switch(img->bpp) {
+            case IMAGE_BPP_BINARY: {
+                uint32_t *row_ptr = fb_alloc(IMAGE_BINARY_LINE_LEN_BYTES(img));
+
+                for (int i=0, ii=img->w; i<ii; i++) {
+                    IMAGE_PUT_BINARY_PIXEL_FAST(row_ptr, i, scalar);
+                }
+
+                for (int i=0, ii=img->h; i<ii; i++) {
+                    op(img, i, row_ptr, data, false);
+                }
+
+                fb_free();
+                break;
+            }
+            case IMAGE_BPP_GRAYSCALE: {
+                uint8_t *row_ptr = fb_alloc(IMAGE_GRAYSCALE_LINE_LEN_BYTES(img));
+
+                for (int i=0, ii=img->w; i<ii; i++) {
+                    IMAGE_PUT_GRAYSCALE_PIXEL_FAST(row_ptr, i, scalar);
+                }
+
+                for (int i=0, ii=img->h; i<ii; i++) {
+                    op(img, i, row_ptr, data, false);
+                }
+
+                fb_free();
+                break;
+            }
+            case IMAGE_BPP_RGB565: {
+                uint16_t *row_ptr = fb_alloc(IMAGE_RGB565_LINE_LEN_BYTES(img));
+
+                for (int i=0, ii=img->w; i<ii; i++) {
+                    IMAGE_PUT_RGB565_PIXEL_FAST(row_ptr, i, scalar);
+                }
+
+                for (int i=0, ii=img->h; i<ii; i++) {
+                    op(img, i, row_ptr, data, false);
+                }
+
+                fb_free();
+                break;
+            }
+            default: {
+                break;
+            }
         }
     }
 }
@@ -395,586 +602,43 @@ void imlib_load_image(image_t *img, const char *path)
 void imlib_save_image(image_t *img, const char *path, rectangle_t *roi, int quality)
 {
     switch (imblib_parse_extension(img, path)) {
-        case FORMAT_DONT_CARE:
-            if (IM_IS_JPEG(img)) {
-                char *new_path = strcat(strcpy(fb_alloc(strlen(path)+5), path), ".jpg");
-                jpeg_write(img, new_path, quality);
-                fb_free();
-            } else {
-                char *new_path = strcat(strcpy(fb_alloc(strlen(path)+5), path), ".bmp");
-                bmp_write_subimg(img, new_path, roi);
-                fb_free();
-            }
-            break;
         case FORMAT_BMP:
             bmp_write_subimg(img, path, roi);
             break;
         case FORMAT_PNM:
             ppm_write_subimg(img, path, roi);
             break;
+        case FORMAT_RAW: {
+            FIL fp;
+            file_write_open(&fp, path);
+            write_data(&fp, img->pixels, img->w * img->h);
+            break;
+        }
         case FORMAT_JPG:
             jpeg_write(img, path, quality);
+            break;
+        case FORMAT_DONT_CARE:
+            // Path doesn't have an extension.
+            if (IM_IS_JPEG(img)) {
+                char *new_path = strcat(strcpy(fb_alloc(strlen(path)+5), path), ".jpg");
+                jpeg_write(img, new_path, quality);
+                fb_free();
+            } else if (IM_IS_BAYER(img)) {
+                FIL fp;
+                char *new_path = strcat(strcpy(fb_alloc(strlen(path)+5), path), ".raw");
+                file_write_open(&fp, new_path);
+                write_data(&fp, img->pixels, img->w * img->h);
+                fb_free();
+            } else { // RGB or GS, save as BMP.
+                char *new_path = strcat(strcpy(fb_alloc(strlen(path)+5), path), ".bmp");
+                bmp_write_subimg(img, new_path, roi);
+                fb_free();
+            }
             break;
     }
 }
 
-void imlib_copy_image(image_t *dst, image_t *src, rectangle_t *roi)
-{
-    if (IM_IS_JPEG(src)) {
-        dst->w = src->w;
-        dst->h = src->h;
-        dst->bpp = src->bpp;
-        dst->pixels = xalloc(src->bpp);
-        memcpy(dst->pixels, src->pixels, src->bpp);
-    } else {
-        rectangle_t rect;
-        if (!rectangle_subimg(src, roi, &rect)) ff_no_intersection(NULL);
-        dst->w = rect.w;
-        dst->h = rect.h;
-        dst->bpp = src->bpp;
-        dst->pixels = xalloc(rect.w * rect.h * src->bpp);
-        uint8_t *dst_pointer = dst->pixels;
-        for (int i = rect.y; i < (rect.y + rect.h); i++) {
-            int length = rect.w * src->bpp;
-            memcpy(dst_pointer,
-                   src->pixels + (rect.x * src->bpp) + (i * src->w * src->bpp),
-                   length);
-            dst_pointer += length;
-        }
-    }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
-
-// Get pixel (handles boundary check and image type check).
-int imlib_get_pixel(image_t *img, int x, int y)
-{
-    return (IM_X_INSIDE(img, x) && IM_Y_INSIDE(img, y)) ?
-        ( IM_IS_GS(img)
-        ? IM_GET_GS_PIXEL(img, x, y)
-        : IM_GET_RGB565_PIXEL(img, x, y) )
-    : 0;
-}
-
-// Set pixel (handles boundary check and image type check).
-void imlib_set_pixel(image_t *img, int x, int y, int p)
-{
-    if (IM_X_INSIDE(img, x) && IM_Y_INSIDE(img, y)) {
-        if (IM_IS_GS(img)) {
-            IM_SET_GS_PIXEL(img, x, y, p);
-        } else {
-            IM_SET_RGB565_PIXEL(img, x, y, p);
-        }
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void imlib_draw_line(image_t *img, int x0, int y0, int x1, int y1, int c)
-{
-    int dx = abs(x1-x0);
-    int dy = abs(y1-y0);
-    int sx = x0<x1 ? 1 : -1;
-    int sy = y0<y1 ? 1 : -1;
-    int err = (dx>dy ? dx : -dy)/2;
-    for (;;) {
-        imlib_set_pixel(img, x0, y0, c);
-        if (x0==x1 && y0==y1) break;
-        int e2 = err;
-        if (e2 > -dx) { err -= dy; x0 += sx; }
-        if (e2 <  dy) { err += dx; y0 += sy; }
-    }
-}
-
-void imlib_draw_rectangle(image_t *img, int rx, int ry, int rw, int rh, int c)
-{
-    if (rw<=0 || rh<=0) {
-        return;
-    }
-    for (int i=rx, j=rx+rw, k=ry+rh-1; i<j; i++) {
-        imlib_set_pixel(img, i, ry, c);
-        imlib_set_pixel(img, i, k, c);
-    }
-    for (int i=ry+1, j=ry+rh-1, k=rx+rw-1; i<j; i++) {
-        imlib_set_pixel(img, rx, i, c);
-        imlib_set_pixel(img, k, i, c);
-    }
-}
-
-void imlib_draw_circle(image_t *img, int cx, int cy, int r, int c)
-{
-    int x = r, y = 0, radiusError = 1-x;
-    while (x>=y) {
-        imlib_set_pixel(img,  x + cx,  y + cy, c);
-        imlib_set_pixel(img,  y + cx,  x + cy, c);
-        imlib_set_pixel(img, -x + cx,  y + cy, c);
-        imlib_set_pixel(img, -y + cx,  x + cy, c);
-        imlib_set_pixel(img, -x + cx, -y + cy, c);
-        imlib_set_pixel(img, -y + cx, -x + cy, c);
-        imlib_set_pixel(img,  x + cx, -y + cy, c);
-        imlib_set_pixel(img,  y + cx, -x + cy, c);
-        y++;
-        if (radiusError<0) {
-            radiusError += 2 * y + 1;
-        } else {
-            x--;
-            radiusError += 2 * (y - x + 1);
-        }
-    }
-}
-
-void imlib_draw_string(image_t *img, int x_off, int y_off, const char *str, int c)
-{
-    const int anchor = x_off;
-    for(char ch, last='\0'; (ch=*str); str++, last=ch) {
-        if (last=='\r' && ch=='\n') { // handle "\r\n" strings
-            continue;
-        }
-        if (ch=='\n' || ch=='\r') { // handle '\n' or '\r' strings
-            x_off = anchor;
-            y_off += font[0].h; // newline height == space height
-            continue;
-        }
-        if (ch<' ' || ch>'~') {
-            imlib_draw_rectangle(img,(x_off+1),(y_off+1),font[0].w-2,font[0].h-2,c);
-            continue;
-        }
-        const glyph_t *g = &font[ch-' '];
-        for (int y=0; y<g->h; y++) {
-            for (int x=0; x<g->w; x++) {
-                if (g->data[y] & (1<<(g->w-x))) {
-                    imlib_set_pixel(img, (x_off+x), (y_off+y), c);
-                }
-            }
-        }
-        x_off += g->w;
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void imlib_binary(image_t *img,
-                  int num_thresholds, simple_color_t *l_thresholds, simple_color_t *h_thresholds,
-                  bool invert)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels;
-        for (int i=0, j=img->w*img->h; i<j; i++) {
-            bool in = false;
-            for (int k=0; k<num_thresholds; k++) {
-                in |= invert ^
-                      ((l_thresholds[k].G <= pixels[i])
-                   && (pixels[i] <= h_thresholds[k].G));
-            }
-            pixels[i] = in ? 0xFF : 0;
-        }
-    } else {
-        uint16_t *pixels = (uint16_t *) img->pixels;
-        for (int i=0, j=img->w*img->h; i<j; i++) {
-            const int pixel = pixels[i];
-            const int lab_l = IM_RGB5652L(pixel);
-            const int lab_a = IM_RGB5652A(pixel);
-            const int lab_b = IM_RGB5652B(pixel);
-            bool in = false;
-            for (int k=0; k<num_thresholds; k++) {
-                in |= invert ^
-                     (((l_thresholds[k].L <= lab_l)
-                   && (lab_l <= h_thresholds[k].L))
-                   && ((l_thresholds[k].A <= lab_a)
-                   && (lab_a <= h_thresholds[k].A))
-                   && ((l_thresholds[k].B <= lab_b)
-                   && (lab_b <= h_thresholds[k].B)));
-            }
-            pixels[i] = in ? 0xFFFF : 0;
-        }
-    }
-}
-
-void imlib_invert(image_t *img)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels;
-        for (int i=0, j=img->w*img->h; i<j; i++) {
-            pixels[i] = ~pixels[i];
-        }
-    } else {
-        uint16_t *pixels = (uint16_t *) img->pixels;
-        for (int i=0, j=img->w*img->h; i<j; i++) {
-            pixels[i] = ~pixels[i];
-        }
-    }
-}
-
-static void imlib_and_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] &= other[i];
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] &= ((uint16_t *) other)[i];
-        }
-    }
-}
-
-void imlib_and(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_and_line_op);
-}
-
-static void imlib_nand_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = ~(pixels[i] & other[i]);
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = ~(pixels[i] & ((uint16_t *) other)[i]);
-        }
-    }
-}
-
-void imlib_nand(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_nand_line_op);
-}
-
-static void imlib_or_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] |= other[i];
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] |= ((uint16_t *) other)[i];
-        }
-    }
-}
-
-void imlib_or(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_or_line_op);
-}
-
-static void imlib_nor_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = ~(pixels[i] | other[i]);
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = ~(pixels[i] | ((uint16_t *) other)[i]);
-        }
-    }
-}
-
-void imlib_nor(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_nor_line_op);
-}
-
-static void imlib_xor_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] ^= other[i];
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] ^= ((uint16_t *) other)[i];
-        }
-    }
-}
-
-void imlib_xor(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_xor_line_op);
-}
-
-static void imlib_xnor_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = ~(pixels[i] ^ other[i]);
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = ~(pixels[i] ^ ((uint16_t *) other)[i]);
-        }
-    }
-}
-
-void imlib_xnor(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_xnor_line_op);
-}
-
-static void imlib_erode_dilate(image_t *img, int ksize, int threshold, int e_or_d)
-{
-    int brows = ksize + 1;
-    uint8_t *buffer = fb_alloc(img->w * brows * img->bpp);
-    if (IM_IS_GS(img)) {
-        for (int y=0; y<img->h; y++) {
-            for (int x=0; x<img->w; x++) {
-                // We're writing into the buffer like if it were a window.
-                int buffer_idx = ((y%brows)*img->w)+x;
-                buffer[buffer_idx] = IM_GET_GS_PIXEL(img, x, y);
-                if ((!!buffer[buffer_idx]) == e_or_d) {
-                    continue; // short circuit (makes this very fast - usually)
-                }
-                int acc = e_or_d ? 0 : -1; // don't count center pixel...
-                for (int j=-ksize; j<=ksize; j++) {
-                    for (int k=-ksize; k<=ksize; k++) {
-                        if (IM_X_INSIDE(img, x+k) && IM_Y_INSIDE(img, y+j)) {
-                            acc += !!IM_GET_GS_PIXEL(img, x+k, y+j);
-                        } else { // outer pixels should not affect result.
-                            acc += e_or_d ? 0 : 1;
-                            // 1 for erode prevents acc from being lower.
-                            // 0 for dilate prevents acc from being higher.
-                        }
-                    }
-                }
-                if (!e_or_d) {
-                    // Preserve original pixel value...
-                    if (acc < threshold) buffer[buffer_idx] = 0; // clear
-                } else {
-                    // Preserve original pixel value...
-                    if (acc > threshold) buffer[buffer_idx] = -1; // set
-                }
-            }
-            if (y>=ksize) {
-                memcpy(img->pixels+((y-ksize)*img->w),
-                       buffer+(((y-ksize)%brows)*img->w),
-                       img->w * sizeof(uint8_t));
-            }
-        }
-        for (int y=img->h-ksize; y<img->h; y++) {
-            memcpy(img->pixels+(y*img->w),
-                   buffer+((y%brows)*img->w),
-                   img->w * sizeof(uint8_t));
-        }
-    } else {
-        for (int y=0; y<img->h; y++) {
-            for (int x=0; x<img->w; x++) {
-                // We're writing into the buffer like if it were a window.
-                int buffer_idx = ((y%brows)*img->w)+x;
-                ((uint16_t *) buffer)[buffer_idx] = IM_GET_RGB565_PIXEL(img, x, y);
-                if ((!!((uint16_t *) buffer)[buffer_idx]) == e_or_d) {
-                    continue; // short circuit (makes this very fast - usually)
-                }
-                int acc = e_or_d ? 0 : -1; // don't count center pixel...
-                for (int j=-ksize; j<=ksize; j++) {
-                    for (int k=-ksize; k<=ksize; k++) {
-                        if (IM_X_INSIDE(img, x+k) && IM_Y_INSIDE(img, y+j)) {
-                            acc += !!IM_GET_RGB565_PIXEL(img, x+k, y+j);
-                        } else { // outer pixels should not affect result.
-                            acc += e_or_d ? 0 : 1;
-                            // 1 for erode prevents acc from being lower.
-                            // 0 for dilate prevents acc from being higher.
-                        }
-                    }
-                }
-                if (!e_or_d) {
-                    // Preserve original pixel value...
-                    if (acc < threshold) ((uint16_t *) buffer)[buffer_idx] = 0; // clear
-                } else {
-                    // Preserve original pixel value...
-                    if (acc > threshold) ((uint16_t *) buffer)[buffer_idx] = -1; // set
-                }
-            }
-            if (y>=ksize) {
-                memcpy(((uint16_t *) img->pixels)+((y-ksize)*img->w),
-                       ((uint16_t *) buffer)+(((y-ksize)%brows)*img->w),
-                       img->w * sizeof(uint16_t));
-            }
-        }
-        for (int y=img->h-ksize; y<img->h; y++) {
-            memcpy(((uint16_t *) img->pixels)+(y*img->w),
-                   ((uint16_t *) buffer)+((y%brows)*img->w),
-                   img->w * sizeof(uint16_t));
-        }
-    }
-    fb_free();
-}
-
-void imlib_erode(image_t *img, int ksize, int threshold)
-{
-    // Threshold should be equal to ((ksize*2)+1)*((ksize*2)+1)-1
-    // for normal operation. E.g. for ksize==3 -> threshold==8
-    // Basically you're adjusting the number of pixels that
-    // must be set in the kernel (besides the center) for the output to be 1.
-    // Erode normally requires all pixels to be 1.
-    imlib_erode_dilate(img, ksize, threshold, 0);
-}
-
-void imlib_dilate(image_t *img, int ksize, int threshold)
-{
-    // Threshold should be equal to 0
-    // for normal operation. E.g. for ksize==3 -> threshold==0
-    // Basically you're adjusting the number of pixels that
-    // must be set in the kernel (besides the center) for the output to be 1.
-    // Dilate normally requires one pixel to be 1.
-    imlib_erode_dilate(img, ksize, threshold, 1);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void imlib_negate(image_t *img)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels;
-        for (int i=0, j=img->w*img->h; i<j; i++) {
-            pixels[i] = IM_MAX_GS - pixels[i];
-        }
-    } else {
-        uint16_t *pixels = (uint16_t *) img->pixels;
-        for (int i=0, j=img->w*img->h; i<j; i++) {
-            const int pixel = pixels[i];
-            const int r = IM_MAX_R5 - IM_R565(pixel);
-            const int g = IM_MAX_G6 - IM_G565(pixel);
-            const int b = IM_MAX_B5 - IM_B565(pixel);
-            pixels[i] = IM_RGB565(r, g, b);
-        }
-    }
-}
-
-static void imlib_difference_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = abs(pixels[i] - other[i]);
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            const int pixel = pixels[i], other_pixel = ((uint16_t *) other)[i];
-            const int r = abs(IM_R565(pixel) - IM_R565(other_pixel));
-            const int g = abs(IM_G565(pixel) - IM_G565(other_pixel));
-            const int b = abs(IM_B565(pixel) - IM_B565(other_pixel));
-            pixels[i] = IM_RGB565(r, g, b);
-        }
-    }
-}
-
-void imlib_difference(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_difference_line_op);
-}
-
-static void imlib_replace_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        memcpy(pixels, other, img->w * sizeof(uint8_t));
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        memcpy(pixels, other, img->w * sizeof(uint16_t));
-    }
-}
-
-void imlib_replace(image_t *img, const char *path, image_t *other)
-{
-    imlib_image_operation(img, path, other, imlib_replace_line_op);
-}
-
-static uint32_t alpha_temp;
-
-static void imlib_blend_line_op(image_t *img, int line, uint8_t *other)
-{
-    if (IM_IS_GS(img)) {
-        uint8_t *pixels = img->pixels + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            pixels[i] = __SMUAD(alpha_temp,__PKHBT(pixels[i],other[i],16))>>8;
-        }
-    } else {
-        uint16_t *pixels = ((uint16_t *) img->pixels) + (img->w * line);
-        for (int i=0; i<img->w; i++) {
-            const int pixel = pixels[i], other_pixel = ((uint16_t *) other)[i];
-            uint32_t vr = __PKHBT(IM_R565(pixel), IM_R565(other_pixel), 16);
-            uint32_t vg = __PKHBT(IM_G565(pixel), IM_G565(other_pixel), 16);
-            uint32_t vb = __PKHBT(IM_B565(pixel), IM_B565(other_pixel), 16);
-            uint32_t r = __SMUAD(alpha_temp, vr)>>8;
-            uint32_t g = __SMUAD(alpha_temp, vg)>>8;
-            uint32_t b = __SMUAD(alpha_temp, vb)>>8;
-            pixels[i] = IM_RGB565(r, g, b);
-        }
-    }
-}
-
-void imlib_blend(image_t *img, const char *path, image_t *other, int alpha)
-{
-    alpha_temp = __PKHBT((256-alpha), alpha, 16);
-    imlib_image_operation(img, path, other, imlib_blend_line_op);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void imlib_histeq(image_t *img)
-{
-    int a = img->w * img->h;
-    float s = IM_MAX_GS / ((float)a);
-    uint32_t *hist = fb_alloc0(IM_G_HIST_SIZE * sizeof(uint32_t));
-
-    if (IM_IS_GS(img)) {
-
-        /* compute image histogram */
-        for (int i=0; i<a; i++) {
-            hist[img->pixels[i]] += 1;
-        }
-
-        /* compute the CDF */
-        for (int i=0, sum=0; i<IM_G_HIST_SIZE; i++) {
-            sum += hist[i];
-            hist[i] = sum;
-        }
-
-        for (int i=0; i<a; i++) {
-            img->pixels[i] =  s * hist[img->pixels[i]];
-        }
-
-    } else {
-
-        uint16_t *pixels = (uint16_t *) img->pixels;
-
-        /* compute image histogram */
-        for (int i=0; i<a; i++) {
-            hist[yuv_table[pixels[i]*3]+128] += 1;
-        }
-
-        /* compute the CDF */
-        for (int i=0, sum=0; i<IM_G_HIST_SIZE; i++) {
-            sum += hist[i];
-            hist[i] = sum;
-        }
-
-        for (int i=0; i<a; i++) {
-            uint8_t y = s * hist[yuv_table[pixels[i]*3]+128];
-            int8_t u = yuv_table[(pixels[i]*3)+1];
-            int8_t v = yuv_table[(pixels[i]*3)+2];
-            pixels[i] = imlib_yuv_to_rgb(y, u, v);
-        }
-
-    }
-
-    fb_free();
-}
 
 // A simple algorithm for correcting lens distortion.
 // See http://www.tannerhelland.com/4743/simple-algorithm-correcting-lens-distortion/
@@ -990,6 +654,7 @@ void imlib_lens_corr(image_t *img, float strength, float zoom)
             // Create a temp copy of the image to pull pixels from.
             uint32_t *tmp = fb_alloc(((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * img->h);
             memcpy(tmp, img->data, ((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * img->h);
+            memset(img->data, 0, ((img->w + UINT32_T_MASK) >> UINT32_T_SHIFT) * img->h);
 
             for (int y = 0, yy = img->h; y < yy; y++) {
                 uint32_t *row_ptr = IMAGE_COMPUTE_BINARY_PIXEL_ROW_PTR(img, y);
@@ -1022,6 +687,7 @@ void imlib_lens_corr(image_t *img, float strength, float zoom)
             // Create a temp copy of the image to pull pixels from.
             uint8_t *tmp = fb_alloc(img->w * img->h * sizeof(uint8_t));
             memcpy(tmp, img->data, img->w * img->h * sizeof(uint8_t));
+            memset(img->data, 0, img->w * img->h * sizeof(uint8_t));
 
             for (int y = 0, yy = img->h; y < yy; y++) {
                 uint8_t *row_ptr = IMAGE_COMPUTE_GRAYSCALE_PIXEL_ROW_PTR(img, y);
@@ -1054,6 +720,7 @@ void imlib_lens_corr(image_t *img, float strength, float zoom)
             // Create a temp copy of the image to pull pixels from.
             uint16_t *tmp = fb_alloc(img->w * img->h * sizeof(uint16_t));
             memcpy(tmp, img->data, img->w * img->h * sizeof(uint16_t));
+            memset(img->data, 0, img->w * img->h * sizeof(uint16_t));
 
             for (int y = 0, yy = img->h; y < yy; y++) {
                 uint16_t *row_ptr = IMAGE_COMPUTE_RGB565_PIXEL_ROW_PTR(img, y);
@@ -1088,36 +755,47 @@ void imlib_lens_corr(image_t *img, float strength, float zoom)
     }
 }
 
-void imlib_mask_ellipse(image_t *img)
-{
-    int h = img->w/2;
-    int v = img->h/2;
-    int a = h * h;
-    int b = v * v;
-    uint8_t *pixels = img->pixels;
-
-    for (int y=0; y<img->h; y++) {
-        for (int x=0; x<img->w; x++) {
-            if ((((x-h)*(x-h)*100) / a + ((y-v)*(y-v)*100) / b) > 100) {
-                pixels[y*img->w+x] = 0;
-            }
-        }
-    }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
-int imlib_image_mean(image_t *src)
+int imlib_image_mean(image_t *src, int *r_mean, int *g_mean, int *b_mean)
 {
-    int s=0;
-    int n=src->w*src->h;
+    int r_s = 0;
+    int g_s = 0;
+    int b_s = 0;
+    int n = src->w * src->h;
 
-    for (int i=0; i<n; i++) {
-        s += src->pixels[i];
+    switch(src->bpp) {
+        case IMAGE_BPP_BINARY: {
+            // Can't run this on a binary image.
+            break;
+        }
+        case IMAGE_BPP_GRAYSCALE: {
+            for (int i=0; i<n; i++) {
+                r_s += src->pixels[i];
+            }
+            *r_mean = r_s/n;
+            *g_mean = r_s/n;
+            *b_mean = r_s/n;
+            break;
+        }
+        case IMAGE_BPP_RGB565: {
+            for (int i=0; i<n; i++) {
+                uint16_t p = ((uint16_t*)src->pixels)[i];
+                r_s += COLOR_RGB565_TO_R8(p);
+                g_s += COLOR_RGB565_TO_G8(p);
+                b_s += COLOR_RGB565_TO_B8(p);
+            }
+            *r_mean = r_s/n;
+            *g_mean = g_s/n;
+            *b_mean = b_s/n;
+            break;
+        }
+        default: {
+            break;
+        }
     }
 
-    /* mean */
-    return s/n;
+    return 0;
 }
 
 // One pass standard deviation.
