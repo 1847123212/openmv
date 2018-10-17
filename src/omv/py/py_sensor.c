@@ -22,15 +22,18 @@
 extern sensor_t sensor;
 
 static mp_obj_t py_sensor_reset() {
-    sensor_reset();
+    PY_ASSERT_FALSE_MSG(sensor_reset() != 0, "Reset Failed");
     return mp_const_none;
 }
 
 static mp_obj_t py_sensor_sleep(mp_obj_t enable) {
-    if (sensor_sleep(mp_obj_is_true(enable)) != 0) {
-        return mp_const_false;
-    }
-    return mp_const_true;
+    PY_ASSERT_FALSE_MSG(sensor_sleep(mp_obj_is_true(enable)) != 0, "Sleep Failed");
+    return mp_const_none;
+}
+
+static mp_obj_t py_sensor_shutdown(mp_obj_t enable) {
+    PY_ASSERT_FALSE_MSG(sensor_shutdown(mp_obj_is_true(enable)) != 0, "Shutdown Failed");
+    return mp_const_none;
 }
 
 static mp_obj_t py_sensor_flush() {
@@ -45,7 +48,7 @@ static mp_obj_t py_sensor_snapshot(uint n_args, const mp_obj_t *args, mp_map_t *
     // Sanity checks
     PY_ASSERT_TRUE_MSG((sensor.pixformat != PIXFORMAT_JPEG), "Operation not supported on JPEG");
 
-    if (sensor.snapshot(&sensor, (image_t*) py_image_cobj(image))==-1) {
+    if (sensor.snapshot(&sensor, (image_t*) py_image_cobj(image), NULL)==-1) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_RuntimeError, "Sensor Timeout!!"));
         return mp_const_false;
     }
@@ -66,7 +69,7 @@ static mp_obj_t py_sensor_skip_frames(uint n_args, const mp_obj_t *args, mp_map_
 
     if (!n_args) {
         while ((systick_current_millis() - millis) < time) { // 32-bit math handles wrap arrounds...
-            if (sensor.snapshot(&sensor, NULL) == -1) {
+            if (sensor.snapshot(&sensor, NULL, NULL) == -1) {
                 nlr_raise(mp_obj_new_exception_msg(&mp_type_RuntimeError, "Sensor Timeout!!"));
             }
         }
@@ -76,7 +79,7 @@ static mp_obj_t py_sensor_skip_frames(uint n_args, const mp_obj_t *args, mp_map_
                 break;
             }
 
-            if (sensor.snapshot(&sensor, NULL) == -1) {
+            if (sensor.snapshot(&sensor, NULL, NULL) == -1) {
                 nlr_raise(mp_obj_new_exception_msg(&mp_type_RuntimeError, "Sensor Timeout!!"));
             }
         }
@@ -427,6 +430,7 @@ static mp_obj_t py_sensor_read_reg(mp_obj_t addr) {
 
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(py_sensor_reset_obj,               py_sensor_reset);
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(py_sensor_sleep_obj,               py_sensor_sleep);
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(py_sensor_shutdown_obj,            py_sensor_shutdown);
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(py_sensor_flush_obj,               py_sensor_flush);
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(py_sensor_snapshot_obj, 0,        py_sensor_snapshot);
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(py_sensor_skip_frames_obj, 0,     py_sensor_skip_frames);
@@ -502,6 +506,8 @@ STATIC const mp_map_elem_t globals_dict_table[] = {
     // Other
     { MP_OBJ_NEW_QSTR(MP_QSTR_LCD),                 MP_OBJ_NEW_SMALL_INT(FRAMESIZE_LCD)},      /* 128x160   */
     { MP_OBJ_NEW_QSTR(MP_QSTR_QQVGA2),              MP_OBJ_NEW_SMALL_INT(FRAMESIZE_QQVGA2)},   /* 128x160   */
+    { MP_OBJ_NEW_QSTR(MP_QSTR_WVGA),                MP_OBJ_NEW_SMALL_INT(FRAMESIZE_WVGA)},     /* 720x480   */
+    { MP_OBJ_NEW_QSTR(MP_QSTR_WVGA2),               MP_OBJ_NEW_SMALL_INT(FRAMESIZE_WVGA2)},    /* 752x480   */
     { MP_OBJ_NEW_QSTR(MP_QSTR_SVGA),                MP_OBJ_NEW_SMALL_INT(FRAMESIZE_SVGA)},     /* 800x600   */
     { MP_OBJ_NEW_QSTR(MP_QSTR_SXGA),                MP_OBJ_NEW_SMALL_INT(FRAMESIZE_SXGA)},     /* 1280x1024 */
     { MP_OBJ_NEW_QSTR(MP_QSTR_UXGA),                MP_OBJ_NEW_SMALL_INT(FRAMESIZE_UXGA)},     /* 1600x1200 */
@@ -509,6 +515,7 @@ STATIC const mp_map_elem_t globals_dict_table[] = {
     // Sensor functions
     { MP_OBJ_NEW_QSTR(MP_QSTR_reset),               (mp_obj_t)&py_sensor_reset_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_sleep),               (mp_obj_t)&py_sensor_sleep_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_shutdown),            (mp_obj_t)&py_sensor_shutdown_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_flush),               (mp_obj_t)&py_sensor_flush_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_snapshot),            (mp_obj_t)&py_sensor_snapshot_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_skip_frames),         (mp_obj_t)&py_sensor_skip_frames_obj },

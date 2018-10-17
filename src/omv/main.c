@@ -53,7 +53,7 @@
 
 #include "sensor.h"
 #include "usbdbg.h"
-#include "wifi_dbg.h"
+#include "wifidbg.h"
 #include "sdram.h"
 #include "fb_alloc.h"
 #include "ff_wrapper.h"
@@ -184,7 +184,7 @@ static const char fresh_selftest_py[] =
 "if __name__ == '__main__':\n"
 "    print('')\n"
 "    test_int_adc()\n"
-"    test_color_bars()\n"
+"    if sensor.get_id() == sensor.OV7725: test_color_bars()\n"
 "\n"
 ;
 #endif
@@ -276,34 +276,19 @@ void NORETURN __stack_chk_fail(void)
 }
 #endif
 
-typedef struct apply_settings_user
-{
-    wifi_dbg_settings_t wifi_dbg_settings;
-}
-apply_settings_user_t;
-
-extern char *strncpy(char *dst, const char *src, size_t n);
-
-static bool ini_handler_callback_is_true(const char *value)
-{
-    int i = ini_atoi(value);
-    if (i) return true;
-    if (strlen(value) != 4) return false;
-    if ((value[0] != 'T') && (value[0] != 't')) return false;
-    if ((value[1] != 'R') && (value[1] != 'r')) return false;
-    if ((value[2] != 'U') && (value[2] != 'u')) return false;
-    if ((value[3] != 'E') && (value[3] != 'e')) return false;
-    return true;
-}
+typedef struct openmv_config {
+    bool wifidbg;
+    wifidbg_config_t wifidbg_config;
+} openmv_config_t;
 
 int ini_handler_callback(void *user, const char *section, const char *name, const char *value)
 {
-    apply_settings_user_t *apply_settings_user = (apply_settings_user_t *) user;
+    openmv_config_t *openmv_config = (openmv_config_t *) user;
 
     #define MATCH(s, n) ((strcmp(section, (s)) == 0) && (strcmp(name, (n)) == 0))
 
-    if (MATCH("BootSettings", "REPLUart")) {
-        if (ini_handler_callback_is_true(value)) {
+    if (MATCH("BoardConfig", "REPLUart")) {
+        if (ini_is_true(value)) {
             mp_obj_t args[2] = {
                 MP_OBJ_NEW_SMALL_INT(3), // UART Port
                 MP_OBJ_NEW_SMALL_INT(115200) // Baud Rate
@@ -311,22 +296,28 @@ int ini_handler_callback(void *user, const char *section, const char *name, cons
 
             MP_STATE_PORT(pyb_stdio_uart) = pyb_uart_type.make_new((mp_obj_t) &pyb_uart_type, MP_ARRAY_SIZE(args), 0, args);
         }
-    } else if (MATCH("BootSettings", "WiFiMode")) {
-        apply_settings_user->wifi_dbg_settings.wifi_mode = ini_atoi(value);
-    } else if (MATCH("BootSettings", "ClientModeSSID")) {
-        strncpy(apply_settings_user->wifi_dbg_settings.wifi_client_ssid, name, SSID_MAX);
-    } else if (MATCH("BootSettings", "ClientModePass")) {
-        strncpy(apply_settings_user->wifi_dbg_settings.wifi_client_pass, name, PASS_MAX);
-    } else if (MATCH("BootSettings", "ClientModeType")) {
-        apply_settings_user->wifi_dbg_settings.wifi_client_type = ini_atoi(value);
-    } else if (MATCH("BootSettings", "AccessPointModeSSID")) {
-        strncpy(apply_settings_user->wifi_dbg_settings.wifi_ap_ssid, name, SSID_MAX);
-    } else if (MATCH("BootSettings", "AccessPointModePass")) {
-        strncpy(apply_settings_user->wifi_dbg_settings.wifi_ap_pass, name, SSID_MAX);
-    } else if (MATCH("BootSettings", "AccessPointModeType")) {
-        apply_settings_user->wifi_dbg_settings.wifi_ap_type = ini_atoi(value);
-    } else if (MATCH("BootSettings", "BoardName")) {
-        strncpy(apply_settings_user->wifi_dbg_settings.wifi_board_name, name, NAME_MAX);
+    } else if (MATCH("BoardConfig", "WiFiDebug")) {
+        openmv_config->wifidbg = ini_is_true(value);
+    } else if (MATCH("WiFiConfig", "Mode")) {
+        openmv_config->wifidbg_config.mode = ini_atoi(value);
+    } else if (MATCH("WiFiConfig", "ClientSSID")) {
+        strncpy(openmv_config->wifidbg_config.client_ssid, value, WINC_MAX_SSID_LEN);
+    } else if (MATCH("WiFiConfig", "ClientKey")) {
+        strncpy(openmv_config->wifidbg_config.client_key,  value, WINC_MAX_PSK_LEN);
+    } else if (MATCH("WiFiConfig", "ClientSecurity")) {
+        openmv_config->wifidbg_config.client_security = ini_atoi(value);
+    } else if (MATCH("WiFiConfig", "ClientChannel")) {
+        openmv_config->wifidbg_config.client_channel = ini_atoi(value);
+    } else if (MATCH("WiFiConfig", "AccessPointSSID")) {
+        strncpy(openmv_config->wifidbg_config.access_point_ssid, value, WINC_MAX_SSID_LEN);
+    } else if (MATCH("WiFiConfig", "AccessPointKey")) {
+        strncpy(openmv_config->wifidbg_config.access_point_key,  value, WINC_MAX_PSK_LEN);
+    } else if (MATCH("WiFiConfig", "AccessPointSecurity")) {
+        openmv_config->wifidbg_config.access_point_security = ini_atoi(value);
+    } else if (MATCH("WiFiConfig", "AccessPointChannel")) {
+        openmv_config->wifidbg_config.access_point_channel = ini_atoi(value);
+    } else if (MATCH("WiFiConfig", "BoardName")) {
+        strncpy(openmv_config->wifidbg_config.board_name,  value, WINC_MAX_BOARD_NAME_LEN);
     } else {
         return 0;
     }
@@ -334,23 +325,6 @@ int ini_handler_callback(void *user, const char *section, const char *name, cons
     return 1;
 
     #undef MATCH
-}
-
-FRESULT apply_settings(const char *path)
-{
-    nlr_buf_t nlr;
-    FRESULT f_res = f_stat(&vfs_fat->fatfs, path, NULL);
-
-    if (f_res == FR_OK) {
-        if (nlr_push(&nlr) == 0) {
-            apply_settings_user_t apply_settings_user = {};
-            ini_parse(&vfs_fat->fatfs, path, ini_handler_callback, &apply_settings_user);
-            wifi_dbg_apply_settings(&apply_settings_user.wifi_dbg_settings);
-            nlr_pop();
-        }
-    }
-
-    return f_res;
 }
 
 FRESULT exec_boot_script(const char *path, bool selftest, bool interruptible)
@@ -361,17 +335,14 @@ FRESULT exec_boot_script(const char *path, bool selftest, bool interruptible)
 
     if (f_res == FR_OK) {
         if (nlr_push(&nlr) == 0) {
-            // Parse and compile the script.
-            mp_obj_t code = pyexec_compile_file(path);
-
             // Enable IDE interrupts if allowed.
             if (interruptible) {
                 usbdbg_set_irq_enabled(true);
                 usbdbg_set_script_running(true);
             }
 
-            // Execute the compiled script.
-            pyexec_exec_code(code);
+            // Parse, compile and execute the script.
+            pyexec_file(path);
             nlr_pop();
         } else {
             interrupted = true;
@@ -482,7 +453,6 @@ soft_reset:
     py_fir_init0();
     servo_init();
     usbdbg_init();
-    wifi_dbg_init();
     sdcard_init();
 
     if (first_soft_reset) {
@@ -554,8 +524,32 @@ soft_reset:
     MP_STATE_VM(vfs_mount_table) = vfs;
     MP_STATE_PORT(vfs_cur) = vfs;
 
+    // set label
+    f_setlabel(&vfs_fat->fatfs, "OPENMV_DISK");
+
+    // Parse OpenMV configuration file.
+    openmv_config_t openmv_config;
+    if (first_soft_reset) {
+        memset(&openmv_config, 0, sizeof(openmv_config));
+        // Parse config, and init wifi if enabled.
+        ini_parse(&vfs_fat->fatfs, "/openmv.config", ini_handler_callback, &openmv_config);
+        if (openmv_config.wifidbg == true &&
+                wifidbg_init(&openmv_config.wifidbg_config) != 0) {
+                openmv_config.wifidbg = false;
+        }
+    }
+
+    // Run boot script(s)
+    if (first_soft_reset) {
+        // Execute the boot.py script before initializing the USB dev
+        // to override the USB mode if required, otherwise VCP+MSC is used.
+        exec_boot_script("/boot.py", false, false);
+    }
+
     // Init USB device to default setting if it was not already configured
-    pyb_usb_dev_init(USBD_VID, USBD_PID_CDC_MSC, USBD_MODE_CDC_MSC, NULL);
+    if (!(pyb_usb_flags & PYB_USB_FLAG_USB_MODE_CALLED)) {
+        pyb_usb_dev_init(USBD_VID, USBD_PID_CDC_MSC, USBD_MODE_CDC_MSC, NULL);
+    }
 
     // check sensor init result
     if (first_soft_reset && sensor_init_ret != 0) {
@@ -569,53 +563,56 @@ soft_reset:
     led_state(LED_GREEN, 0);
     led_state(LED_BLUE, 0);
 
+    if (openmv_config.wifidbg == true) {
+        timer_tim5_init(100);
+    }
+
     // Run boot script(s)
     if (first_soft_reset) {
         exec_boot_script("/selftest.py", true, false);
-        apply_settings("/openmv.config");
         exec_boot_script("/main.py", false, true);
     }
 
-    // If there's no script ready, just re-exec REPL
-    while (!usbdbg_script_ready()) {
-        nlr_buf_t nlr;
+    do {
+        usbdbg_init();
 
-        if (nlr_push(&nlr) == 0) {
-            // enable IDE interrupt
-            usbdbg_set_irq_enabled(true);
+        // If there's no script ready, just re-exec REPL
+        while (!usbdbg_script_ready()) {
+            nlr_buf_t nlr;
 
-            // run REPL
-            if (pyexec_mode_kind == PYEXEC_MODE_RAW_REPL) {
-                if (pyexec_raw_repl() != 0) {
-                    break;
+            if (nlr_push(&nlr) == 0) {
+                // enable IDE interrupt
+                usbdbg_set_irq_enabled(true);
+
+                // run REPL
+                if (pyexec_mode_kind == PYEXEC_MODE_RAW_REPL) {
+                    if (pyexec_raw_repl() != 0) {
+                        break;
+                    }
+                } else {
+                    if (pyexec_friendly_repl() != 0) {
+                        break;
+                    }
                 }
-            } else {
-                if (pyexec_friendly_repl() != 0) {
-                    break;
-                }
+
+                nlr_pop();
             }
-
-            nlr_pop();
         }
-    }
 
-    if (usbdbg_script_ready()) {
-        nlr_buf_t nlr;
-        if (nlr_push(&nlr) == 0) {
-            // Parse and compile the script
-            vstr_t *buf = usbdbg_get_script();
-            mp_obj_t code = pyexec_compile_str(buf);
+        if (usbdbg_script_ready()) {
+            nlr_buf_t nlr;
+            if (nlr_push(&nlr) == 0) {
+                // Enable IDE interrupt
+                usbdbg_set_irq_enabled(true);
 
-            // Enable IDE interrupt
-            usbdbg_set_irq_enabled(true);
-
-            // Execute the compiled script
-            pyexec_exec_code(code);
-            nlr_pop();
-        } else {
-            mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+                // Execute the script.
+                pyexec_str(usbdbg_get_script());
+                nlr_pop();
+            } else {
+                mp_obj_print_exception(&mp_plat_print, (mp_obj_t)nlr.ret_val);
+            }
         }
-    }
+    } while (openmv_config.wifidbg == true);
 
     // Disable all other IRQs except Systick and Flash IRQs
     // Note: FS IRQ is disable, since we're going for a soft-reset.

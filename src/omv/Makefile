@@ -9,7 +9,7 @@ SRCS += $(addprefix ,   \
 	framebuffer.c       \
 	array.c             \
 	usbdbg.c            \
-	wifi_dbg.c          \
+	wifidbg.c           \
 	cambus.c            \
 	ov9650.c            \
 	ov2640.c            \
@@ -74,10 +74,7 @@ SRCS += $(addprefix img/,   \
 	sincos_tab.c            \
 	edge.c                  \
 	hog.c                   \
-	lenet.c                 \
-	lenet_model_num.c       \
-	cifar10.c               \
-	cifar10_model.c         \
+	selective_search.c      \
    )
 
 SRCS += $(addprefix nn/,    \

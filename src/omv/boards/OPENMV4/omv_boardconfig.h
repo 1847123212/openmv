@@ -40,6 +40,10 @@
 // Enable hardware JPEG
 #define OMV_HARDWARE_JPEG       (1)
 
+// Enable MT9V034 and LEPTON sensors
+#define OMV_ENABLE_MT9V034      (1)
+#define OMV_ENABLE_LEPTON       (1)
+
 // If buffer size is bigger than this threshold, the quality is reduced.
 // This is only used for JPEG images sent to the IDE not normal compression.
 #define JPEG_QUALITY_THRESH     (320*240*2)
@@ -56,10 +60,11 @@
 #define OMV_DMA_MEMORY          AXI_SRAM    // DMA buffers memory.
 #define OMV_FB_MEMORY           AXI_SRAM    // Framebuffer, fb_alloc
 #define OMV_JPEG_MEMORY         SRAM3       // JPEG buffer memory.
+#define OMV_VOSPI_MEMORY        SRAM4       // VoSPI buffer memory.
 
 #define OMV_FB_SIZE             (400K)      // FB memory: header + VGA/GS image
-#define OMV_FB_ALLOC_SIZE       (100K)      // minimum fb alloc size
-#define OMV_STACK_SIZE          (8K)
+#define OMV_FB_ALLOC_SIZE       (96K)       // minimum fb alloc size
+#define OMV_STACK_SIZE          (7K)
 #define OMV_HEAP_SIZE           (240K)
 
 #define OMV_LINE_BUF_SIZE       (3K)        // Image line buffer round(640 * 2BPP * 2 buffers).
@@ -83,8 +88,8 @@
 #define OMV_AXI_SRAM_LENGTH     512K
 
 // Use the MPU to set an uncacheable memory region.
-//#define OMV_DMA_REGION_BASE     OMV_SRAMX_ORIGIN
-//#define OMV_DMA_REGION_SIZE     MPU_REGION_SIZE_XXKB
+#define OMV_DMA_REGION_BASE     (OMV_AXI_SRAM_ORIGIN+(500*1024))
+#define OMV_DMA_REGION_SIZE     MPU_REGION_SIZE_16KB
 
 /* SCCB/I2C */
 #define SCCB_I2C                (I2C1)
@@ -111,14 +116,8 @@
 #define DCMI_PWDN_PIN           (GPIO_PIN_7)
 #define DCMI_PWDN_PORT          (GPIOD)
 
-#define DCMI_FREX_PIN           (GPIO_PIN_9)
-#define DCMI_FREX_PORT          (GPIOD)
-
-#define DCMI_EXPST_PIN          (GPIO_PIN_8)
-#define DCMI_EXPST_PORT         (GPIOD)
-
-#define DCMI_FSIN_PIN           (GPIO_PIN_3)
-#define DCMI_FSIN_PORT          (GPIOD)
+#define DCMI_FSIN_PIN           (GPIO_PIN_5)
+#define DCMI_FSIN_PORT          (GPIOB)
 
 #define DCMI_D0_PIN             (GPIO_PIN_6)
 #define DCMI_D1_PIN             (GPIO_PIN_7)
@@ -152,12 +151,6 @@
 #define DCMI_PWDN_LOW()         HAL_GPIO_WritePin(DCMI_PWDN_PORT, DCMI_PWDN_PIN, GPIO_PIN_RESET)
 #define DCMI_PWDN_HIGH()        HAL_GPIO_WritePin(DCMI_PWDN_PORT, DCMI_PWDN_PIN, GPIO_PIN_SET)
 
-#define DCMI_FREX_LOW()         HAL_GPIO_WritePin(DCMI_FREX_PORT, DCMI_FREX_PIN, GPIO_PIN_RESET)
-#define DCMI_FREX_HIGH()        HAL_GPIO_WritePin(DCMI_FREX_PORT, DCMI_FREX_PIN, GPIO_PIN_SET)
-
-#define DCMI_EXPST_LOW()        HAL_GPIO_WritePin(DCMI_EXPST_PORT, DCMI_EXPST_PIN, GPIO_PIN_RESET)
-#define DCMI_EXPST_HIGH()       HAL_GPIO_WritePin(DCMI_EXPST_PORT, DCMI_EXPST_PIN, GPIO_PIN_SET)
-
 #define DCMI_FSIN_LOW()         HAL_GPIO_WritePin(DCMI_FSIN_PORT, DCMI_FSIN_PIN, GPIO_PIN_RESET)
 #define DCMI_FSIN_HIGH()        HAL_GPIO_WritePin(DCMI_FSIN_PORT, DCMI_FSIN_PIN, GPIO_PIN_SET)
 
@@ -182,7 +175,7 @@
 #define WINC_EN_PIN             (GPIO_PIN_5)
 #define WINC_CS_PIN             (GPIO_PIN_12)
 #define WINC_RST_PIN            (GPIO_PIN_12)
-#define WINC_IRQ_PIN            (&pin_D13)
+#define WINC_IRQ_PIN            (pin_D13)
 
 #define WINC_EN_PORT            (GPIOA)
 #define WINC_CS_PORT            (GPIOB)
@@ -190,5 +183,50 @@
 
 #define WINC_CS_LOW()           HAL_GPIO_WritePin(WINC_CS_PORT, WINC_CS_PIN, GPIO_PIN_RESET)
 #define WINC_CS_HIGH()          HAL_GPIO_WritePin(WINC_CS_PORT, WINC_CS_PIN, GPIO_PIN_SET)
+
+#define I2C_PORT                GPIOB
+#define I2C_SIOC_PIN            GPIO_PIN_10
+#define I2C_SIOD_PIN            GPIO_PIN_11
+
+#define I2C_SIOC_H()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOC_PIN, GPIO_PIN_SET)
+#define I2C_SIOC_L()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOC_PIN, GPIO_PIN_RESET)
+
+#define I2C_SIOD_H()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOD_PIN, GPIO_PIN_SET)
+#define I2C_SIOD_L()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOD_PIN, GPIO_PIN_RESET)
+
+#define I2C_SIOD_READ()         HAL_GPIO_ReadPin(I2C_PORT, I2C_SIOD_PIN)
+#define I2C_SIOD_WRITE(bit)     HAL_GPIO_WritePin(I2C_PORT, I2C_SIOD_PIN, bit);
+
+#define I2C_SPIN_DELAY          32
+
+#define LEPTON_SPI                  (SPI3)
+#define LEPTON_SPI_AF               (GPIO_AF6_SPI3)
+// SPI1/2/3 clock source is PLL2 (160MHz/8 == 20MHz).
+#define LEPTON_SPI_PRESCALER        (SPI_BAUDRATEPRESCALER_8)
+
+#define LEPTON_SPI_IRQn             (SPI3_IRQn)
+#define LEPTON_SPI_IRQHandler       (SPI3_IRQHandler)
+
+#define LEPTON_SPI_DMA_IRQn         (DMA1_Stream0_IRQn)
+#define LEPTON_SPI_DMA_STREAM       (DMA1_Stream0)
+
+#define LEPTON_SPI_DMA_REQUEST      (DMA_REQUEST_SPI3_RX)
+#define LEPTON_SPI_DMA_IRQHandler   (DMA1_Stream0_IRQHandler)
+
+#define LEPTON_SPI_RESET()          __HAL_RCC_SPI3_FORCE_RESET()
+#define LEPTON_SPI_RELEASE()        __HAL_RCC_SPI3_RELEASE_RESET()
+
+#define LEPTON_SPI_CLK_ENABLE()     __HAL_RCC_SPI3_CLK_ENABLE()
+#define LEPTON_SPI_CLK_DISABLE()    __HAL_RCC_SPI3_CLK_DISABLE()
+
+#define LEPTON_SPI_SCLK_PIN         (GPIO_PIN_3)
+#define LEPTON_SPI_MISO_PIN         (GPIO_PIN_4)
+#define LEPTON_SPI_MOSI_PIN         (GPIO_PIN_5)
+#define LEPTON_SPI_SSEL_PIN         (GPIO_PIN_15)
+
+#define LEPTON_SPI_SCLK_PORT        (GPIOB)
+#define LEPTON_SPI_MISO_PORT        (GPIOB)
+#define LEPTON_SPI_MOSI_PORT        (GPIOB)
+#define LEPTON_SPI_SSEL_PORT        (GPIOA)
 
 #endif //__OMV_BOARDCONFIG_H__

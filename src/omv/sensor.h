@@ -52,6 +52,8 @@ typedef enum {
     // Other
     FRAMESIZE_LCD,      // 128x160
     FRAMESIZE_QQVGA2,   // 128x160
+    FRAMESIZE_WVGA,     // 720x480
+    FRAMESIZE_WVGA2,    // 752x480
     FRAMESIZE_SVGA,     // 800x600
     FRAMESIZE_SXGA,     // 1280x1024
     FRAMESIZE_UXGA,     // 1600x1200
@@ -101,6 +103,8 @@ typedef enum {
 #define SENSOR_HW_FLAGS_SET(s, x, v) ((s)->hw_flags |= (v<<x))
 #define SENSOR_HW_FLAGS_CLR(s, x)    ((s)->hw_flags &= ~(1<<x))
 
+typedef bool (*streaming_cb_t)(image_t *image);
+
 typedef struct _sensor sensor_t;
 typedef struct _sensor {
     uint8_t  chip_id;           // Sensor ID.
@@ -145,7 +149,7 @@ typedef struct _sensor {
     int  (*set_vflip)           (sensor_t *sensor, int enable);
     int  (*set_special_effect)  (sensor_t *sensor, sde_t sde);
     int  (*set_lens_correction) (sensor_t *sensor, int enable, int radi, int coef);
-    int  (*snapshot)            (sensor_t *sensor, image_t *image);
+    int  (*snapshot)            (sensor_t *sensor, image_t *image, streaming_cb_t streaming_cb);
 } sensor_t;
 
 // Resolution table
@@ -165,6 +169,9 @@ int sensor_get_id();
 
 // Sleep mode.
 int sensor_sleep(int enable);
+
+// Shutdown mode.
+int sensor_shutdown(int enable);
 
 // Read a sensor register.
 int sensor_read_reg(uint8_t reg_addr);
@@ -237,5 +244,5 @@ int sensor_set_lens_correction(int enable, int radi, int coef);
 int sensor_set_vsync_output(GPIO_TypeDef *gpio, uint32_t pin);
 
 // Default snapshot function.
-int sensor_snapshot(sensor_t *sensor, image_t *image);
+int sensor_snapshot(sensor_t *sensor, image_t *image, streaming_cb_t streaming_cb);
 #endif /* __SENSOR_H__ */

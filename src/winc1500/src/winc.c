@@ -160,7 +160,7 @@ static void socket_callback(SOCKET sock, uint8_t msg_type, void *msg)
                 *((int*) async_request_data) = pstrRecv->s16BufferSize;
                 debug_printf("recv %d\n", pstrRecv->s16BufferSize);
             } else {
-                *((int*) async_request_data) = -1;
+                *((int*) async_request_data) = pstrRecv->s16BufferSize;
                 debug_printf("recv error! %d\n", pstrRecv->s16BufferSize);
             }
             async_request_done = true;
@@ -179,7 +179,7 @@ static void socket_callback(SOCKET sock, uint8_t msg_type, void *msg)
 				debug_printf("recvfrom size: %d addr:%lu port:%d\n",
                         pstrRecv->s16BufferSize, rfrom->addr.sin_addr.s_addr, rfrom->addr.sin_port);
 			} else {
-                rfrom->size = -1;
+                rfrom->size = pstrRecv->s16BufferSize;
 				debug_printf("recvfrom error:%d\n", pstrRecv->s16BufferSize);
 			}
             async_request_done = true;
@@ -762,22 +762,32 @@ int winc_socket_send(int fd, const uint8_t *buf, uint32_t len, uint32_t timeout)
     return bytes;
 }
 
-int winc_socket_recv(int fd, uint8_t *buf, uint32_t len, uint32_t timeout)
+int winc_socket_recv(int fd, uint8_t *buf, uint32_t len, winc_socket_buf_t *sockbuf, uint32_t timeout)
 {
-    // cap length at SOCKET_BUFFER_MAX_LENGTH
-    len = MIN(len, SOCKET_BUFFER_MAX_LENGTH);
+    if (sockbuf->size == 0) { // No buffered data.
+        sockbuf->idx = 0; // Reset sockbuf index.
 
-    // do the recv
-    int ret = WINC1500_EXPORT(recv)(fd, buf, len, timeout);
-    if (ret == SOCK_ERR_NO_ERROR) {
-        // Do async request
-        ret = winc_async_request(SOCKET_MSG_RECV, &len, timeout);
+        int recv_bytes;
+        // Set recv to the maximum possible packet size.
+        int ret = WINC1500_EXPORT(recv)(fd, sockbuf->buf, SOCKET_BUFFER_MAX_LENGTH, timeout);
+        if (ret == SOCK_ERR_NO_ERROR) {
+            // Do async request
+            // sockbuf->size is the actual size of the recv'd packet.
+            ret = winc_async_request(SOCKET_MSG_RECV, &recv_bytes, timeout);
+        }
+
+        if (ret != SOCK_ERR_NO_ERROR || recv_bytes <= 0) {
+            return (recv_bytes <= 0)? recv_bytes : ret;
+        }
+
+        sockbuf->size = recv_bytes;
     }
 
-    if (ret != SOCK_ERR_NO_ERROR) {
-        return ret;
-    }
-    return len;
+    uint32_t bytes = MIN(len, sockbuf->size);
+    memcpy(buf, sockbuf->buf+sockbuf->idx, bytes);
+    sockbuf->idx  += bytes;
+    sockbuf->size -= bytes;
+    return bytes;
 }
 
 int winc_socket_sendto(int fd, const uint8_t *buf, uint32_t len, sockaddr *addr, uint32_t timeout)

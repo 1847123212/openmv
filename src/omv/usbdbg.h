@@ -18,7 +18,7 @@
   * the IDE will Not connect if the major version number is different.
   */
 #define FIRMWARE_VERSION_MAJOR      (3)
-#define FIRMWARE_VERSION_MINOR      (0)
+#define FIRMWARE_VERSION_MINOR      (2)
 #define FIRMWARE_VERSION_PATCH      (0)
 
 /**
@@ -54,4 +54,7 @@ vstr_t *usbdbg_get_script();
 bool usbdbg_get_irq_enabled();
 void usbdbg_set_irq_enabled(bool enabled);
 void usbdbg_set_script_running(bool running);
+void usbdbg_data_in(void *buffer, int length);
+void usbdbg_data_out(void *buffer, int length);
+void usbdbg_control(void *buffer, uint8_t brequest, uint32_t wlength);
 #endif /* __USBDBG_H__ */

@@ -56,7 +56,7 @@
 #define OMV_FB_SIZE         (151K)  // FB memory: header + QVGA/GS image
 #define OMV_FB_ALLOC_SIZE   (12K)   // minimum fb alloc size
 #define OMV_STACK_SIZE      (4K)
-#define OMV_HEAP_SIZE       (52K)
+#define OMV_HEAP_SIZE       (51K)
 
 #define OMV_LINE_BUF_SIZE   (2K)    // Image line buffer round(320 * 2BPP * 2 buffers).
 #define OMV_MSC_BUF_SIZE    (2K)    // USB MSC bot data
@@ -100,15 +100,6 @@
 #define DCMI_PWDN_PIN           (GPIO_PIN_5)
 #define DCMI_PWDN_PORT          (GPIOB)
 
-#define DCMI_FREX_PIN           (GPIO_PIN_9)
-#define DCMI_FREX_PORT          (GPIOD)
-
-#define DCMI_EXPST_PIN          (GPIO_PIN_8)
-#define DCMI_EXPST_PORT         (GPIOD)
-
-#define DCMI_FSIN_PIN           (GPIO_PIN_3)
-#define DCMI_FSIN_PORT          (GPIOD)
-
 #define DCMI_D0_PIN             (GPIO_PIN_6)
 #define DCMI_D1_PIN             (GPIO_PIN_7)
 #define DCMI_D2_PIN             (GPIO_PIN_0)
@@ -141,15 +132,6 @@
 #define DCMI_PWDN_LOW()         HAL_GPIO_WritePin(DCMI_PWDN_PORT, DCMI_PWDN_PIN, GPIO_PIN_RESET)
 #define DCMI_PWDN_HIGH()        HAL_GPIO_WritePin(DCMI_PWDN_PORT, DCMI_PWDN_PIN, GPIO_PIN_SET)
 
-#define DCMI_FREX_LOW()         HAL_GPIO_WritePin(DCMI_FREX_PORT, DCMI_FREX_PIN, GPIO_PIN_RESET)
-#define DCMI_FREX_HIGH()        HAL_GPIO_WritePin(DCMI_FREX_PORT, DCMI_FREX_PIN, GPIO_PIN_SET)
-
-#define DCMI_EXPST_LOW()        HAL_GPIO_WritePin(DCMI_EXPST_PORT, DCMI_EXPST_PIN, GPIO_PIN_RESET)
-#define DCMI_EXPST_HIGH()       HAL_GPIO_WritePin(DCMI_EXPST_PORT, DCMI_EXPST_PIN, GPIO_PIN_SET)
-
-#define DCMI_FSIN_LOW()         HAL_GPIO_WritePin(DCMI_FSIN_PORT, DCMI_FSIN_PIN, GPIO_PIN_RESET)
-#define DCMI_FSIN_HIGH()        HAL_GPIO_WritePin(DCMI_FSIN_PORT, DCMI_FSIN_PIN, GPIO_PIN_SET)
-
 #define DCMI_VSYNC_IRQN         EXTI9_5_IRQn
 #define DCMI_VSYNC_IRQ_LINE     (7)
 
@@ -170,7 +152,7 @@
 #define WINC_EN_PIN             (GPIO_PIN_5)
 #define WINC_CS_PIN             (GPIO_PIN_12)
 #define WINC_RST_PIN            (GPIO_PIN_12)
-#define WINC_IRQ_PIN            (&pin_D13)
+#define WINC_IRQ_PIN            (pin_D13)
 
 #define WINC_EN_PORT            (GPIOA)
 #define WINC_CS_PORT            (GPIOB)
@@ -178,5 +160,20 @@
 
 #define WINC_CS_LOW()           HAL_GPIO_WritePin(WINC_CS_PORT, WINC_CS_PIN, GPIO_PIN_RESET)
 #define WINC_CS_HIGH()          HAL_GPIO_WritePin(WINC_CS_PORT, WINC_CS_PIN, GPIO_PIN_SET)
+
+#define I2C_PORT                GPIOB
+#define I2C_SIOC_PIN            GPIO_PIN_10
+#define I2C_SIOD_PIN            GPIO_PIN_11
+
+#define I2C_SIOC_H()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOC_PIN, GPIO_PIN_SET)
+#define I2C_SIOC_L()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOC_PIN, GPIO_PIN_RESET)
+
+#define I2C_SIOD_H()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOD_PIN, GPIO_PIN_SET)
+#define I2C_SIOD_L()            HAL_GPIO_WritePin(I2C_PORT, I2C_SIOD_PIN, GPIO_PIN_RESET)
+
+#define I2C_SIOD_READ()         HAL_GPIO_ReadPin(I2C_PORT, I2C_SIOD_PIN)
+#define I2C_SIOD_WRITE(bit)     HAL_GPIO_WritePin(I2C_PORT, I2C_SIOD_PIN, bit);
+
+#define I2C_SPIN_DELAY          16
 
 #endif //__OMV_BOARDCONFIG_H__

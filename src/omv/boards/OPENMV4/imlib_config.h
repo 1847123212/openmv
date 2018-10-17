@@ -9,8 +9,17 @@
 #ifndef __IMLIB_CONFIG_H__
 #define __IMLIB_CONFIG_H__
 
+// Enable binary ops
+#define IMLIB_ENABLE_BINARY_OPS
+
+// Enable math ops
+#define IMLIB_ENABLE_MATH_OPS
+
 // Enable flood_fill()
 #define IMLIB_ENABLE_FLOOD_FILL
+
+// Enable mean()
+#define IMLIB_ENABLE_MEAN
 
 // Enable median()
 #define IMLIB_ENABLE_MEDIAN
@@ -20,6 +29,9 @@
 
 // Enable midpoint()
 #define IMLIB_ENABLE_MIDPOINT
+
+// Enable morph()
+#define IMLIB_ENABLE_MORPH
 
 // Enable Gaussian
 #define IMLIB_ENABLE_GAUSSIAN
@@ -107,5 +119,8 @@
 
 // Enable find_hog()
 #define IMLIB_ENABLE_HOG
+
+// Enable selective_search()
+#define IMLIB_ENABLE_SELECTIVE_SEARCH
 
 #endif //__IMLIB_CONFIG_H__

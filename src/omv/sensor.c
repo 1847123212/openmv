@@ -23,15 +23,16 @@
 
 #define OV_CHIP_ID      (0x0A)
 #define ON_CHIP_ID      (0x00)
-#define MAX_XFER_SIZE (0xFFFC)
+#define MAX_XFER_SIZE   (0xFFFC*4)
 
-sensor_t sensor;
-TIM_HandleTypeDef  TIMHandle;
-DMA_HandleTypeDef  DMAHandle;
-DCMI_HandleTypeDef DCMIHandle;
+sensor_t           sensor     = {0};
+TIM_HandleTypeDef  TIMHandle  = {0};
+DMA_HandleTypeDef  DMAHandle  = {0};
+DCMI_HandleTypeDef DCMIHandle = {0};
 
 static volatile int line = 0;
 extern uint8_t _line_buf;
+static uint8_t *dest_fb = NULL;
 
 const int resolution[][2] = {
     {0,    0   },
@@ -59,6 +60,8 @@ const int resolution[][2] = {
     // Other
     {128,  160 },    /* LCD       */
     {128,  160 },    /* QQVGA2    */
+    {720,  480 },    /* WVGA      */
+    {752,  480 },    /* WVGA2     */
     {800,  600 },    /* SVGA      */
     {1280, 1024},    /* SXGA      */
     {1600, 1200},    /* UXGA      */
@@ -67,34 +70,37 @@ const int resolution[][2] = {
 #if (OMV_XCLK_SOURCE == OMV_XCLK_TIM)
 static int extclk_config(int frequency)
 {
-    // Doubles PCLK
-    //__HAL_RCC_TIMCLKPRESCALER(RCC_TIMPRES_ACTIVATED);
-
     /* TCLK (PCLK * 2) */
-    int tclk  = DCMI_TIM_PCLK_FREQ() * 2;
+    int tclk = DCMI_TIM_PCLK_FREQ() * 2;
 
     /* Period should be even */
     int period = (tclk / frequency) - 1;
 
+    if (TIMHandle.Init.Period && (TIMHandle.Init.Period != period)) {
+        // __HAL_TIM_SET_AUTORELOAD sets TIMHandle.Init.Period...
+        __HAL_TIM_SET_AUTORELOAD(&TIMHandle, period);
+        __HAL_TIM_SET_COMPARE(&TIMHandle, DCMI_TIM_CHANNEL, period / 2);
+        return 0;
+    }
+
     /* Timer base configuration */
-    TIMHandle.Instance          = DCMI_TIM;
-    TIMHandle.Init.Period       = period;
-    TIMHandle.Init.Prescaler    = 0;
-    TIMHandle.Init.ClockDivision = 0;
+    TIMHandle.Instance           = DCMI_TIM;
+    TIMHandle.Init.Period        = period;
+    TIMHandle.Init.Prescaler     = TIM_ETRPRESCALER_DIV1;
     TIMHandle.Init.CounterMode   = TIM_COUNTERMODE_UP;
+    TIMHandle.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
 
     /* Timer channel configuration */
     TIM_OC_InitTypeDef TIMOCHandle;
-    TIMOCHandle.Pulse       = period/2;
+    TIMOCHandle.Pulse       = period / 2;
     TIMOCHandle.OCMode      = TIM_OCMODE_PWM1;
     TIMOCHandle.OCPolarity  = TIM_OCPOLARITY_HIGH;
     TIMOCHandle.OCFastMode  = TIM_OCFAST_DISABLE;
     TIMOCHandle.OCIdleState = TIM_OCIDLESTATE_RESET;
 
-    if (HAL_TIM_PWM_Init(&TIMHandle) != HAL_OK
-            || HAL_TIM_PWM_ConfigChannel(&TIMHandle, &TIMOCHandle, DCMI_TIM_CHANNEL) != HAL_OK
-            || HAL_TIM_PWM_Start(&TIMHandle, DCMI_TIM_CHANNEL) != HAL_OK) {
-        // Initialization Error
+    if ((HAL_TIM_PWM_Init(&TIMHandle) != HAL_OK)
+    || (HAL_TIM_PWM_ConfigChannel(&TIMHandle, &TIMOCHandle, DCMI_TIM_CHANNEL) != HAL_OK)
+    || (HAL_TIM_PWM_Start(&TIMHandle, DCMI_TIM_CHANNEL) != HAL_OK)) {
         return -1;
     }
 
@@ -138,7 +144,7 @@ static int dcmi_config(uint32_t jpeg_mode)
     }
 
     // Configure and enable DCMI IRQ Channel
-    HAL_NVIC_SetPriority(DCMI_IRQn, IRQ_PRI_DCMI, IRQ_SUBPRI_DCMI);
+    NVIC_SetPriority(DCMI_IRQn, IRQ_PRI_DCMI);
     HAL_NVIC_EnableIRQ(DCMI_IRQn);
     return 0;
 }
@@ -165,7 +171,7 @@ static int dma_config()
     DMAHandle.Init.PeriphBurst          = DMA_PBURST_SINGLE;        /* Peripheral burst                 */
 
     // Configure and disable DMA IRQ Channel
-    HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, IRQ_PRI_DMA21, IRQ_SUBPRI_DMA21);
+    NVIC_SetPriority(DMA2_Stream1_IRQn, IRQ_PRI_DMA21);
     HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);
 
     // Initialize the DMA stream
@@ -301,15 +307,17 @@ int sensor_init()
 
     if (sensor.slv_addr == LEPTON_ID) {
         sensor.chip_id = LEPTON_ID;
-        extclk_config(25000000);
+        if (extclk_config(LEPTON_XCLK_FREQ) != 0) {
+            return -3;
+        }
         init_ret = lepton_init(&sensor);
     } else {
         // Read ON semi sensor ID.
         cambus_readb(sensor.slv_addr, ON_CHIP_ID, &sensor.chip_id);
         if (sensor.chip_id == MT9V034_ID) {
-            // On/Aptina MT requires 13-27MHz clock.
-            extclk_config(27000000);
-            // Only the MT9V034 is currently supported.
+            if (extclk_config(MT9V034_XCLK_FREQ) != 0) {
+                return -3;
+            }
             init_ret = mt9v034_init(&sensor);
         } else { // Read OV sensor ID.
             cambus_readb(sensor.slv_addr, OV_CHIP_ID, &sensor.chip_id);
@@ -398,6 +406,18 @@ int sensor_sleep(int enable)
     return 0;
 }
 
+int sensor_shutdown(int enable)
+{
+    if (enable) {
+        DCMI_PWDN_HIGH();
+    } else {
+        DCMI_PWDN_LOW();
+    }
+
+    systick_sleep(10);
+    return 0;
+}
+
 int sensor_read_reg(uint8_t reg_addr)
 {
     if (sensor.read_reg == NULL) {
@@ -440,7 +460,7 @@ int sensor_set_pixformat(pixformat_t pixformat)
     }
 
     // Skip the first frame.
-    MAIN_FB()->bpp = 0;
+    MAIN_FB()->bpp = -1;
 
     return dcmi_config(jpeg_mode);
 }
@@ -463,7 +483,7 @@ int sensor_set_framesize(framesize_t framesize)
     sensor.framesize = framesize;
 
     // Skip the first frame.
-    MAIN_FB()->bpp = 0;
+    MAIN_FB()->bpp = -1;
 
     // Set MAIN FB x, y offset.
     MAIN_FB()->x = 0;
@@ -695,7 +715,7 @@ int sensor_set_vsync_output(GPIO_TypeDef *gpio, uint32_t pin)
     sensor.vsync_pin  = pin;
     sensor.vsync_gpio = gpio;
     // Enable VSYNC EXTI IRQ
-    HAL_NVIC_SetPriority(DCMI_VSYNC_IRQN, IRQ_PRI_EXTINT, IRQ_SUBPRI_EXTINT);
+    NVIC_SetPriority(DCMI_VSYNC_IRQN, IRQ_PRI_EXTINT);
     HAL_NVIC_EnableIRQ(DCMI_VSYNC_IRQN);
     return 0;
 }
@@ -744,11 +764,10 @@ static void sensor_check_buffsize()
 void DCMI_DMAConvCpltUser(uint32_t addr)
 {
     uint8_t *src = (uint8_t*) addr;
-    uint8_t *dst = MAIN_FB()->pixels;
+    uint8_t *dst = dest_fb;
 
     uint16_t *src16 = (uint16_t*) addr;
-    uint16_t *dst16 = (uint16_t*) MAIN_FB()->pixels;
-
+    uint16_t *dst16 = (uint16_t*) dest_fb;
 
     // Skip lines outside the window.
     if (line >= MAIN_FB()->y && line <= (MAIN_FB()->y + MAIN_FB()->h)) {
@@ -792,8 +811,11 @@ void DCMI_DMAConvCpltUser(uint32_t addr)
 
 // This is the default snapshot function, which can be replaced in sensor_init functions. This function
 // uses the DCMI and DMA to capture frames and each line is processed in the DCMI_DMAConvCpltUser function.
-int sensor_snapshot(sensor_t *sensor, image_t *image)
+int sensor_snapshot(sensor_t *sensor, image_t *image, streaming_cb_t streaming_cb)
 {
+    uint32_t frame = 0;
+    bool streaming = (streaming_cb != NULL); // Streaming mode.
+    bool doublebuf = false; // Use double buffers in streaming mode.
     uint32_t addr, length, tick_start;
 
     // Compress the framebuffer for the IDE preview, only if it's not the first frame,
@@ -804,6 +826,10 @@ int sensor_snapshot(sensor_t *sensor, image_t *image)
     // Make sure the raw frame fits into the FB. If it doesn't it will be cropped if
     // the format is set to GS, otherwise the pixel format will be swicthed to BAYER.
     sensor_check_buffsize();
+
+    // Set the current frame buffer target used in the DMA line callback
+    // (DCMI_DMAConvCpltUser function), in both snapshot and streaming modes.
+    dest_fb = MAIN_FB()->pixels;
 
     // The user may have changed the MAIN_FB width or height on the last image so we need
     // to restore that here. We don't have to restore bpp because that's taken care of
@@ -822,17 +848,17 @@ int sensor_snapshot(sensor_t *sensor, image_t *image)
         case PIXFORMAT_RGB565:
         case PIXFORMAT_YUV422:
             // RGB/YUV read 2 bytes per pixel.
-            length = (w * h * 2)/4;
+            length = (w * h * 2);
             addr = (uint32_t) &_line_buf;
             break;
         case PIXFORMAT_BAYER:
             // BAYER/RAW: 1 byte per pixel
-            length = (w * h * 1)/4;
+            length = (w * h * 1);
             addr = (uint32_t) &_line_buf;
             break;
         case PIXFORMAT_GRAYSCALE:
             // 1/2BPP Grayscale.
-            length = (w * h * sensor->gs_bpp)/4;
+            length = (w * h * sensor->gs_bpp);
             addr = (uint32_t) &_line_buf;
             break;
         case PIXFORMAT_JPEG:
@@ -844,74 +870,109 @@ int sensor_snapshot(sensor_t *sensor, image_t *image)
             return -1;
     }
 
-    // Clear line counter
-    line = 0;
-
-    // Snapshot start tick
-    tick_start = HAL_GetTick();
-
-    // Enable DMA IRQ
-    HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
-
-    if (sensor->pixformat == PIXFORMAT_JPEG) {
-        // Start a regular transfer
-        HAL_DCMI_Start_DMA(&DCMIHandle,
-                DCMI_MODE_SNAPSHOT, addr, length);
-    } else {
-        // Start a multibuffer transfer (line by line)
-        HAL_DCMI_Start_DMA_MB(&DCMIHandle,
-                DCMI_MODE_SNAPSHOT, addr, length, h);
+    if (streaming_cb) {
+        image->pixels = NULL;
     }
 
-    // Wait for frame
-    while ((DCMI->CR & DCMI_CR_CAPTURE) != 0) {
-        // Wait for interrupt
-        __WFI();
+    // If two frames fit in ram, use double buffering in streaming mode.
+    doublebuf = ((length*2) <= OMV_RAW_BUF_SIZE);
 
-        if ((HAL_GetTick() - tick_start) >= 3000) {
-            // Sensor timeout, most likely a HW issue.
-            // Abort the DMA request.
-            HAL_DMA_Abort(&DMAHandle);
-            return -1;
+    do {
+        // Clear line counter
+        line = 0;
+
+        // Snapshot start tick
+        tick_start = HAL_GetTick();
+
+        // Enable DMA IRQ
+        HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+
+        if (sensor->pixformat == PIXFORMAT_JPEG) {
+            // Start a regular transfer
+            HAL_DCMI_Start_DMA(&DCMIHandle,
+                    DCMI_MODE_SNAPSHOT, addr, length/4);
+        } else {
+            // Start a multibuffer transfer (line by line)
+            HAL_DCMI_Start_DMA_MB(&DCMIHandle,
+                    DCMI_MODE_SNAPSHOT, addr, length/4, h);
         }
-    }
 
-    // Abort DMA transfer.
-    // Note: In JPEG mode the DMA will still be waiting for data since
-    // the max frame size is set, so we need to abort the DMA transfer.
-    HAL_DMA_Abort(&DMAHandle);
+        if (streaming_cb && doublebuf && image->pixels != NULL) {
+            // Call streaming callback function with previous frame.
+            // Note: Image pointer should Not be NULL in streaming mode.
+            streaming = streaming_cb(image);
+        }
 
-    // Disable DMA IRQ
-    HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);
-    
+        // Wait for frame
+        while ((DCMI->CR & DCMI_CR_CAPTURE) != 0) {
+            // Wait for interrupt
+            __WFI();
 
-    // Fix the BPP
-    switch (sensor->pixformat) {
-        case PIXFORMAT_GRAYSCALE:
-            MAIN_FB()->bpp = 1;
-            break;
-        case PIXFORMAT_YUV422:
-        case PIXFORMAT_RGB565:
-            MAIN_FB()->bpp = 2;
-            break;
-        case PIXFORMAT_BAYER:
-            MAIN_FB()->bpp = 3;
-            break;
-        case PIXFORMAT_JPEG:
-            // Read the number of data items transferred
-            MAIN_FB()->bpp = (MAX_XFER_SIZE - __HAL_DMA_GET_COUNTER(&DMAHandle))*4;
-            break;
-        default:
-            break;
-    }
+            if ((HAL_GetTick() - tick_start) >= 3000) {
+                // Sensor timeout, most likely a HW issue.
+                // Abort the DMA request.
+                HAL_DMA_Abort(&DMAHandle);
+                return -1;
+            }
+        }
 
-    // Set the user image.
-    if (image != NULL) {
-        image->w = MAIN_FB()->w;
-        image->h = MAIN_FB()->h;
-        image->bpp = MAIN_FB()->bpp;
-        image->pixels = MAIN_FB()->pixels;
-    }
+        // Abort DMA transfer.
+        // Note: In JPEG mode the DMA will still be waiting for data since
+        // the max frame size is set, so we need to abort the DMA transfer.
+        HAL_DMA_Abort(&DMAHandle);
+
+        // Disable DMA IRQ
+        HAL_NVIC_DisableIRQ(DMA2_Stream1_IRQn);
+
+        // Fix the BPP
+        switch (sensor->pixformat) {
+            case PIXFORMAT_GRAYSCALE:
+                MAIN_FB()->bpp = 1;
+                break;
+            case PIXFORMAT_YUV422:
+            case PIXFORMAT_RGB565:
+                MAIN_FB()->bpp = 2;
+                break;
+            case PIXFORMAT_BAYER:
+                MAIN_FB()->bpp = 3;
+                break;
+            case PIXFORMAT_JPEG:
+                // Read the number of data items transferred
+                MAIN_FB()->bpp = (MAX_XFER_SIZE - __HAL_DMA_GET_COUNTER(&DMAHandle))*4;
+                break;
+            default:
+                break;
+        }
+
+        // Set the user image.
+        if (image != NULL) {
+            image->w = MAIN_FB()->w;
+            image->h = MAIN_FB()->h;
+            image->bpp = MAIN_FB()->bpp;
+            image->pixels = MAIN_FB()->pixels;
+
+            if (streaming_cb) {
+                // In streaming mode, either switch frame buffers in double buffer mode,
+                // or call the streaming callback with the main FB in single buffer mode.
+                if (doublebuf == false) {
+                    // In single buffer mode, call streaming callback.
+                    streaming = streaming_cb(image);
+                } else {
+                    // In double buffer mode, switch frame buffers.
+                    if (frame == 0) {
+                        image->pixels = MAIN_FB()->pixels;
+                        // Next frame will be transfered to the second half.
+                        dest_fb = MAIN_FB()->pixels + length;
+                    } else {
+                        image->pixels = MAIN_FB()->pixels + length;
+                        // Next frame will be transfered to the first half.
+                        dest_fb = MAIN_FB()->pixels;
+                    }
+                    frame ^= 1; // Switch frame buffers.
+                }
+            }
+        }
+    } while (streaming == true);
 
     return 0;
 }

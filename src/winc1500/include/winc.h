@@ -9,15 +9,18 @@
 #ifndef __WINC_H__
 #define __WINC_H__
 #include <stdint.h>
-#define WINC_IP_ADDR_LEN    (4)
-#define WINC_MAC_ADDR_LEN   (6)
-#define WINC_MAX_SSID_LEN   (33)
+#define WINC_IP_ADDR_LEN        (4)
+#define WINC_MAC_ADDR_LEN       (6)
+#define WINC_MAX_SSID_LEN       (33)
+#define WINC_MAX_PSK_LEN        (65)
+#define WINC_MAX_BOARD_NAME_LEN (33)
+#define WINC_SOCKBUF_SIZE       (1400)
 
 #define MAKE_SOCKADDR(addr, ip, port) \
     struct sockaddr addr; \
     addr.sa_family = AF_INET; \
-    addr.sa_data[0] = port >> 8; \
-    addr.sa_data[1] = port; \
+    addr.sa_data[0] = (uint8_t)(port >> 8); \
+    addr.sa_data[1] = (uint8_t)(port); \
     addr.sa_data[2] = ip[0]; \
     addr.sa_data[3] = ip[1]; \
     addr.sa_data[4] = ip[2]; \
@@ -38,6 +41,14 @@ typedef enum {
     WINC_MODE_FIRMWARE,
 } winc_mode_t;
 
+typedef enum {
+    WINC_SEC_INVALID = 0,
+    WINC_SEC_OPEN,
+    WINC_SEC_WPA_PSK,
+    WINC_SEC_WEP,
+    WINC_SEC_802_1X
+} winc_security_t;
+
 typedef struct {
     int8_t  rssi;
     uint8_t security;
@@ -47,29 +58,36 @@ typedef struct {
 } winc_ifconfig_t;
 
 typedef struct {
-	int8_t  rssi;
-	uint8_t security;
+    int8_t  rssi;
+    uint8_t security;
     uint8_t channel;
-	uint8_t bssid[6];
-	char    ssid[WINC_MAX_SSID_LEN];
+    uint8_t bssid[6];
+    char    ssid[WINC_MAX_SSID_LEN];
 } winc_scan_result_t;
 
 typedef int (*winc_scan_callback_t) (winc_scan_result_t *, void *);
 
 typedef struct {
-	uint8_t fw_major;       // Firmware version major number.
-	uint8_t fw_minor;       // Firmware version minor number.
-	uint8_t fw_patch;       // Firmware version patch number.
-	uint8_t drv_major;      // Driver version major number.
-	uint8_t drv_minor;      // Driver version minor number.
-	uint8_t drv_patch;      // Driver version patch number.
-	uint32_t chip_id;       // HW revision number (chip ID).
+    uint8_t fw_major;       // Firmware version major number.
+    uint8_t fw_minor;       // Firmware version minor number.
+    uint8_t fw_patch;       // Firmware version patch number.
+    uint8_t drv_major;      // Driver version major number.
+    uint8_t drv_minor;      // Driver version minor number.
+    uint8_t drv_patch;      // Driver version patch number.
+    uint32_t chip_id;       // HW revision number (chip ID).
 } winc_fwver_t;
 
 typedef struct {
     int16_t  fd;
     uint16_t timeout;
 } winc_socket_t;
+
+// Sock buffer workaround for WINC's recv issue.
+typedef struct {
+    int idx;
+    int size;
+    uint8_t buf[WINC_SOCKBUF_SIZE];
+} winc_socket_buf_t;
 
 typedef struct sockaddr sockaddr;
 typedef struct sockaddr_in sockaddr_in;
@@ -97,8 +115,9 @@ int winc_socket_listen(int fd, uint32_t backlog);
 int winc_socket_accept(int fd, sockaddr *addr, int *fd_out, uint32_t timeout);
 int winc_socket_connect(int fd, sockaddr *addr, uint32_t timeout);
 int winc_socket_send(int fd, const uint8_t *buf, uint32_t len, uint32_t timeout);
-int winc_socket_recv(int fd, uint8_t *buf, uint32_t len, uint32_t timeout);
+int winc_socket_recv(int fd, uint8_t *buf, uint32_t len, winc_socket_buf_t *sockbuf, uint32_t timeout);
 int winc_socket_sendto(int fd, const uint8_t *buf, uint32_t len, sockaddr *addr, uint32_t timeout);
 int winc_socket_recvfrom(int fd, uint8_t *buf, uint32_t len, sockaddr *addr, uint32_t timeout);
 int winc_socket_setsockopt(int fd, uint32_t level, uint32_t opt, const void *optval, uint32_t optlen);
+
 #endif //__WINC_H__
